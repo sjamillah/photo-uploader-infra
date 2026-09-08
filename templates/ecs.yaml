@@ -68,7 +68,6 @@ Parameters:
 
 Resources:
 
-
   # --- Load balancer --------------------------------------------------------
 
   LoadBalancer:
@@ -96,7 +95,9 @@ Resources:
   # --- Target groups --------------------------------------------------------
 
   # Identical by design: CodeDeploy moves traffic between them, so any
-  # difference would change behaviour depending on which one is live.
+  # difference would change behaviour depending on which one is live. Green
+  # holds the replacement task set until the listener is swapped onto it,
+  # which is the cutover.
   Fn::ForEach::TargetGroups:
     - Colour
     - [Blue, Green]
@@ -122,9 +123,9 @@ Resources:
             - Key: deregistration_delay.timeout_seconds
               Value: '30'
 
-  # --- Listeners ------------------------------------------------------------
+  # --- Listener -------------------------------------------------------------
 
-  ProdListener:
+  Listener:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
       LoadBalancerArn: !Ref LoadBalancer
@@ -133,19 +134,6 @@ Resources:
       DefaultActions:
         - Type: forward
           TargetGroupArn: !Ref TargetGroupBlue
-
-  # CodeDeploy validates the replacement task set here before shifting
-  # production. Unreachable from outside: the ALB group only opens :80.
-  TestListener:
-    Type: AWS::ElasticLoadBalancingV2::Listener
-    Properties:
-      LoadBalancerArn: !Ref LoadBalancer
-      Protocol: HTTP
-      Port: 8080
-      DefaultActions:
-        - Type: forward
-          TargetGroupArn: !Ref TargetGroupGreen
-
 
   # --- Logging --------------------------------------------------------------
 
@@ -242,7 +230,7 @@ Resources:
     Type: AWS::ECS::Service
     # ECS rejects a target group that is not yet attached to a listener.
     # Across two stacks the ordering was implicit; in one it has to be said.
-    DependsOn: ProdListener
+    DependsOn: Listener
     Properties:
       ServiceName: !Sub '${ProjectName}-service'
       Cluster: !Ref Cluster
@@ -343,12 +331,12 @@ Resources:
           - TargetGroups:
               - Name: !GetAtt TargetGroupBlue.TargetGroupName
               - Name: !GetAtt TargetGroupGreen.TargetGroupName
+            # Two target groups are what blue/green swaps between, so both
+            # are required. TestTrafficRoute is not: it exists to serve
+            # validation traffic, and nothing here sends any.
             ProdTrafficRoute:
               ListenerArns:
-                - !Ref ProdListener
-            TestTrafficRoute:
-              ListenerArns:
-                - !Ref TestListener
+                - !Ref Listener
 
   # --- Alarms that gate the cutover -----------------------------------------
 

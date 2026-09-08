@@ -286,10 +286,10 @@ Resources:
       FromPort: 8080
       ToPort: 8080
       DestinationSecurityGroupId: !Ref EcsSecurityGroup
-      Description: Production and test traffic to the containers
+      Description: Traffic to the containers
 
-  # One rule covers both listeners: the listener port is what the ALB accepts,
-  # the target port is what it connects to, and both target groups use 8080.
+  # The listener port is what the ALB accepts; this is the target port it
+  # connects to, and both target groups use it.
   EcsFromAlbIngress:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
