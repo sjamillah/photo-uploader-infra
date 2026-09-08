@@ -1,0 +1,424 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::LanguageExtensions
+Description: photo-uploader VPC - subnets, routing, endpoints, security groups
+
+Mappings:
+  # Keys become the logical ids (VpcEndpointEcrApi and so on); the values are
+  # the service names, which cannot be logical ids because of the dots.
+  EndpointServices:
+    EcrApi: { Service: ecr.api }
+    EcrDkr: { Service: ecr.dkr }
+    Logs: { Service: logs }
+    SecretsManager: { Service: secretsmanager }
+    SsmMessages: { Service: ssmmessages }
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Naming }
+        Parameters: [ProjectName]
+      - Label: { default: Addressing }
+        Parameters: [VpcCidr, PublicTierCidr, AppTierCidr, DataTierCidr]
+      - Label: { default: Service ranges }
+        Parameters: [S3PrefixListId]
+
+Parameters:
+  ProjectName:
+    Type: String
+    AllowedPattern: '^[a-z][a-z0-9-]{2,20}$'
+
+  VpcCidr: { Type: String }
+
+  PublicTierCidr:
+    Type: String
+    Description: Split into two /26 subnets, one per AZ.
+
+  AppTierCidr:
+    Type: String
+    Description: Split into two /26 subnets, one per AZ.
+
+  DataTierCidr:
+    Type: String
+    Description: Split into two /27 subnets, one per AZ.
+
+  S3PrefixListId:
+    Type: String
+    AllowedPattern: '^pl-[0-9a-f]+$'
+
+Resources:
+
+  # --- VPC and internet gateway ---------------------------------------------
+
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      # Both are required for PrivateDnsEnabled on the interface endpoints.
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-vpc'
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-igw'
+
+  IgwAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  # --- Subnets --------------------------------------------------------------
+
+  # Fn::Cidr [block, count, hostBits] where hostBits is 32 minus the prefix.
+  # Resolved values are in the trailing comments so the file stays greppable.
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [0, !Cidr [!Ref PublicTierCidr, 2, 6]]   # 10.20.0.0/26
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-public-a'
+        - Key: Tier
+          Value: public
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [1, !Cidr [!Ref PublicTierCidr, 2, 6]]   # 10.20.0.64/26
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-public-b'
+        - Key: Tier
+          Value: public
+
+  PrivateAppSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [0, !Cidr [!Ref AppTierCidr, 2, 6]]      # 10.20.4.0/26
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-app-a'
+        - Key: Tier
+          Value: private-app
+
+  PrivateAppSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [1, !Cidr [!Ref AppTierCidr, 2, 6]]      # 10.20.4.64/26
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-app-b'
+        - Key: Tier
+          Value: private-app
+
+  PrivateDataSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [0, !Cidr [!Ref DataTierCidr, 2, 5]]     # 10.20.8.0/27
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-data-a'
+        - Key: Tier
+          Value: private-data
+
+  PrivateDataSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [1, !Cidr [!Ref DataTierCidr, 2, 5]]     # 10.20.8.32/27
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-data-b'
+        - Key: Tier
+          Value: private-data
+
+  # --- Routing --------------------------------------------------------------
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-rt-public'
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IgwAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  # One private table per AZ, and no default route in either. The only way off
+  # the VPC is the S3 gateway endpoint below. Per-AZ tables cost nothing and
+  # make adding a NAT later a two-line change.
+  PrivateRouteTableA:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-rt-private-a'
+
+  PrivateRouteTableB:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-rt-private-b'
+
+  PublicSubnetARouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetBRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateAppSubnetARouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateAppSubnetA
+      RouteTableId: !Ref PrivateRouteTableA
+
+  PrivateAppSubnetBRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateAppSubnetB
+      RouteTableId: !Ref PrivateRouteTableB
+
+  PrivateDataSubnetARouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateDataSubnetA
+      RouteTableId: !Ref PrivateRouteTableA
+
+  PrivateDataSubnetBRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateDataSubnetB
+      RouteTableId: !Ref PrivateRouteTableB
+
+  # --- Security groups ------------------------------------------------------
+
+  # Groups are declared bare and every rule is a separate resource. Inline
+  # rules referencing another group in the same template are circular.
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Public ALB, accepts HTTP from the internet
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: Public HTTP
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-alb-sg'
+
+  EcsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Fargate tasks, ALB inbound and AWS-service outbound only
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-ecs-sg'
+
+  RdsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: PostgreSQL, reachable only from the tasks
+      VpcId: !Ref Vpc
+      # Omitting SecurityGroupEgress gets an implicit allow-all-outbound.
+      # A rule to an unroutable address is how you actually close a group.
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 127.0.0.1/32
+          Description: No egress required
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-rds-sg'
+
+  VpcEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Interface endpoint ENIs, HTTPS from the tasks
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 127.0.0.1/32
+          Description: No egress required, responses are stateful
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-vpce-sg'
+
+  # --- Security group rules -------------------------------------------------
+
+  AlbToEcsEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref AlbSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort: 8080
+      DestinationSecurityGroupId: !Ref EcsSecurityGroup
+      Description: Production and test traffic to the containers
+
+  # One rule covers both listeners: the listener port is what the ALB accepts,
+  # the target port is what it connects to, and both target groups use 8080.
+  EcsFromAlbIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EcsSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort: 8080
+      SourceSecurityGroupId: !Ref AlbSecurityGroup
+      Description: Gunicorn
+
+  EcsToEndpointsEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref EcsSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      DestinationSecurityGroupId: !Ref VpcEndpointSecurityGroup
+      Description: ECR, CloudWatch Logs, Secrets Manager, SSM Messages
+
+  EcsToS3Egress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref EcsSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      DestinationPrefixListId: !Ref S3PrefixListId
+      Description: S3 gateway endpoint, image layers and photo objects
+
+  EcsToRdsEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref EcsSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      DestinationSecurityGroupId: !Ref RdsSecurityGroup
+      Description: PostgreSQL
+
+  RdsFromEcsIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref RdsSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref EcsSecurityGroup
+      Description: PostgreSQL from the application tasks
+
+  EndpointsFromEcsIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref VpcEndpointSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Ref EcsSecurityGroup
+      Description: HTTPS to the endpoint ENIs
+
+  # --- VPC endpoints --------------------------------------------------------
+
+  # Free, and required for ECR pulls: image layers are stored in S3.
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref PrivateRouteTableA
+        - !Ref PrivateRouteTableB
+
+  # ECR pulls need ecr.api and ecr.dkr, log delivery needs logs, secret
+  # injection needs secretsmanager, and ECS Exec needs ssmmessages. Together
+  # with the S3 gateway endpoint they are why there is no NAT gateway.
+  Fn::ForEach::InterfaceEndpoints:
+    - Name
+    - [EcrApi, EcrDkr, Logs, SecretsManager, SsmMessages]
+    - VpcEndpoint${Name}:
+        Type: AWS::EC2::VPCEndpoint
+        Metadata:
+          cfn-lint:
+            config:
+              # E3064 warns about duplicate private DNS domains. It cannot
+              # resolve the service name through FindInMap, so it sees five
+              # identical endpoints. They are distinct.
+              ignore_checks: [E3064]
+        Properties:
+          VpcId: !Ref Vpc
+          ServiceName: !Sub
+            - 'com.amazonaws.${AWS::Region}.${Svc}'
+            - Svc: !FindInMap [EndpointServices, !Ref Name, Service]
+          VpcEndpointType: Interface
+          PrivateDnsEnabled: true
+          SubnetIds:
+            - !Ref PrivateAppSubnetA
+            - !Ref PrivateAppSubnetB
+          SecurityGroupIds:
+            - !Ref VpcEndpointSecurityGroup
+
+Outputs:
+  VpcId:
+    Value: !Ref Vpc
+
+  PublicSubnets:
+    Value: !Join [',', [!Ref PublicSubnetA, !Ref PublicSubnetB]]
+
+  PrivateAppSubnets:
+    Value: !Join [',', [!Ref PrivateAppSubnetA, !Ref PrivateAppSubnetB]]
+
+  PrivateDataSubnets:
+    Value: !Join [',', [!Ref PrivateDataSubnetA, !Ref PrivateDataSubnetB]]
+
+  AlbSecurityGroupId:
+    Value: !Ref AlbSecurityGroup
+
+  EcsSecurityGroupId:
+    Value: !Ref EcsSecurityGroup
+
+  RdsSecurityGroupId:
+    Value: !Ref RdsSecurityGroup

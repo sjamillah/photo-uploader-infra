@@ -1,0 +1,212 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: photo-uploader CodePipeline - EventBridge trigger and CodeDeploy hand-off
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Naming }
+        Parameters: [ProjectName, AlertTopicArn]
+      - Label: { default: Source control }
+        Parameters: [ConnectionArn, GitHubOrg, GitHubAppRepo, GitHubBranch]
+      - Label: { default: From iam.yaml }
+        Parameters: [PipelineRoleArn, EventBridgeRoleArn]
+      - Label: { default: From bootstrap.yaml and ecs.yaml }
+        Parameters:
+          - EcrRepositoryName
+          - TriggerImageTag
+          - CodeDeployApplicationName
+          - CodeDeployDeploymentGroupName
+
+Parameters:
+  ProjectName: { Type: String }
+
+  AlertTopicArn: { Type: String }
+
+  ConnectionArn:
+    Type: String
+    Description: An AVAILABLE CodeConnections connection.
+
+  GitHubOrg: { Type: String }
+
+  GitHubAppRepo: { Type: String }
+
+  GitHubBranch:
+    Type: String
+    Description: The branch supplying appspec.yaml and taskdef.json.
+
+  PipelineRoleArn: { Type: String }
+
+  EventBridgeRoleArn: { Type: String }
+
+  EcrRepositoryName: { Type: String }
+
+  TriggerImageTag: { Type: String }
+
+  CodeDeployApplicationName: { Type: String }
+
+  CodeDeployDeploymentGroupName:
+    Type: String
+
+Resources:
+
+  # --- Artifact store -------------------------------------------------------
+
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub '${ProjectName}-artifacts-${AWS::AccountId}-${AWS::Region}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          # Artifacts are disposable, and without this the bucket grows by a
+          # couple of megabytes per deployment forever.
+          - Id: expire-artifacts
+            Status: Enabled
+            ExpirationInDays: 30
+          - Id: abort-incomplete-uploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+
+  # --- Pipeline -------------------------------------------------------------
+
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub '${ProjectName}-pipeline'
+      PipelineType: V2
+      ExecutionMode: QUEUED
+      RoleArn: !Ref PipelineRoleArn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+      Stages:
+        - Name: Source
+          Actions:
+            # Produces imageDetail.json, which carries the image URI including
+            # its digest. That digest is what actually gets deployed.
+            - Name: Image
+              RunOrder: 1
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: ECR
+                Version: '1'
+              Configuration:
+                RepositoryName: !Ref EcrRepositoryName
+                ImageTag: !Ref TriggerImageTag
+              OutputArtifacts:
+                - Name: ImageArtifact
+
+            - Name: DeployConfig
+              RunOrder: 1
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: '1'
+              Configuration:
+                ConnectionArn: !Ref ConnectionArn
+                FullRepositoryId: !Sub '${GitHubOrg}/${GitHubAppRepo}'
+                BranchName: !Ref GitHubBranch
+                # Only the image push starts a deployment; otherwise a README
+                # edit would trigger a release.
+                DetectChanges: false
+              OutputArtifacts:
+                - Name: ConfigArtifact
+
+        - Name: Deploy
+          Actions:
+            - Name: BlueGreen
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CodeDeployToECS
+                Version: '1'
+              InputArtifacts:
+                - Name: ConfigArtifact
+                - Name: ImageArtifact
+              Configuration:
+                ApplicationName: !Ref CodeDeployApplicationName
+                DeploymentGroupName: !Ref CodeDeployDeploymentGroupName
+                TaskDefinitionTemplateArtifact: ConfigArtifact
+                TaskDefinitionTemplatePath: deploy/taskdef.json
+                AppSpecTemplateArtifact: ConfigArtifact
+                AppSpecTemplatePath: deploy/appspec.yaml
+                # Substitutes the digest from imageDetail.json into the
+                # IMAGE1_NAME placeholder in taskdef.json.
+                Image1ArtifactName: ImageArtifact
+                Image1ContainerName: IMAGE1_NAME
+
+  # --- Triggers and notifications -------------------------------------------
+
+  EcrPushRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${ProjectName}-ecr-push'
+      Description: Starts the deployment pipeline when a new image lands
+      State: ENABLED
+      EventPattern:
+        source:
+          - aws.ecr
+        detail-type:
+          - ECR Image Action
+        detail:
+          action-type:
+            - PUSH
+          result:
+            - SUCCESS
+          repository-name:
+            - !Ref EcrRepositoryName
+          # The build pushes both :sha and :latest, which emits two events.
+          # This filter makes exactly one of them start a pipeline.
+          image-tag:
+            - !Ref TriggerImageTag
+      Targets:
+        - Id: codepipeline
+          Arn: !Sub 'arn:${AWS::Partition}:codepipeline:${AWS::Region}:${AWS::AccountId}:${Pipeline}'
+          RoleArn: !Ref EventBridgeRoleArn
+
+  PipelineFailureRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${ProjectName}-pipeline-failed'
+      Description: Notify when a pipeline execution fails
+      State: ENABLED
+      EventPattern:
+        source:
+          - aws.codepipeline
+        detail-type:
+          - CodePipeline Pipeline Execution State Change
+        detail:
+          pipeline:
+            - !Ref Pipeline
+          state:
+            - FAILED
+      Targets:
+        - Id: alert
+          Arn: !Ref AlertTopicArn
+          InputTransformer:
+            InputPathsMap:
+              pipeline: '$.detail.pipeline'
+              execution: '$.detail.execution-id'
+            InputTemplate: '"Deployment FAILED. Pipeline: <pipeline> Execution: <execution>"'
+
+Outputs:
+  PipelineName:
+    Value: !Ref Pipeline
+
+  ArtifactBucketName:
+    Value: !Ref ArtifactBucket
+
+  EventRuleName:
+    Value: !Ref EcrPushRule

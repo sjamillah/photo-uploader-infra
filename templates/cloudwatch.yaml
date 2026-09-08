@@ -1,0 +1,166 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: photo-uploader CloudWatch alarms - the ones that notify, not the ones that block
+
+# Everything here publishes to SNS and nothing else acts on it. The two alarms
+# CodeDeploy blocks a cutover on are in ecs.yaml, because they have to
+# exist before the deployment group that names them.
+#
+# Deployed last, since the dimensions come from the database, the load
+# balancer and the service.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Naming }
+        Parameters: [ProjectName, AlertTopicArn]
+      - Label: { default: 'Dimensions from rds.yaml, alb.yaml and ecs.yaml' }
+        Parameters:
+          - DbInstanceIdentifier
+          - LoadBalancerFullName
+          - TargetGroupBlueFullName
+          - ClusterName
+          - ServiceName
+          - MaxCapacity
+
+Parameters:
+  ProjectName: { Type: String }
+  AlertTopicArn: { Type: String }
+  DbInstanceIdentifier: { Type: String }
+  LoadBalancerFullName: { Type: String }
+  TargetGroupBlueFullName: { Type: String }
+  ClusterName: { Type: String }
+  ServiceName: { Type: String }
+  MaxCapacity: { Type: Number }
+
+Resources:
+
+  # --- Database -------------------------------------------------------------
+
+  DbCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-db-cpu'
+      AlarmDescription: Database CPU sustained above 80 percent
+      Namespace: AWS/RDS
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref DbInstanceIdentifier
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopicArn
+
+  DbFreeStorageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-db-free-storage'
+      AlarmDescription: Under 2 GiB free, so storage autoscaling should have fired
+      Namespace: AWS/RDS
+      MetricName: FreeStorageSpace
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref DbInstanceIdentifier
+      Statistic: Minimum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 2147483648
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - !Ref AlertTopicArn
+
+  # 2 workers x pool max_size 4 x 4 tasks is 32 at full scale. Seeing this
+  # alarm means the pool is leaking, not that traffic is real.
+  DbConnectionsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-db-connections'
+      AlarmDescription: Connections approaching the db.t3.micro ceiling
+      Namespace: AWS/RDS
+      MetricName: DatabaseConnections
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref DbInstanceIdentifier
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 60
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopicArn
+
+  # --- Load balancer --------------------------------------------------------
+
+  # Not a deployment gate: during a cutover the green group is legitimately
+  # unhealthy for a few seconds.
+  UnhealthyBlueTargetsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-unhealthy-targets-blue'
+      AlarmDescription: One or more blue targets failing health checks
+      Namespace: AWS/ApplicationELB
+      MetricName: UnHealthyHostCount
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !Ref LoadBalancerFullName
+        - Name: TargetGroup
+          Value: !Ref TargetGroupBlueFullName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopicArn
+
+  # --- Service capacity -----------------------------------------------------
+
+  NoRunningTasksAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-no-running-tasks'
+      AlarmDescription: Service below its minimum capacity
+      Namespace: ECS/ContainerInsights
+      MetricName: RunningTaskCount
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref ClusterName
+        - Name: ServiceName
+          Value: !Ref ServiceName
+      Statistic: Minimum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      # Missing data means the service is not reporting at all.
+      TreatMissingData: breaching
+      AlarmActions:
+        - !Ref AlertTopicArn
+
+  MaxCapacityAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-at-max-capacity'
+      AlarmDescription: Auto scaling has hit its ceiling
+      Namespace: ECS/ContainerInsights
+      MetricName: RunningTaskCount
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref ClusterName
+        - Name: ServiceName
+          Value: !Ref ServiceName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: !Ref MaxCapacity
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopicArn

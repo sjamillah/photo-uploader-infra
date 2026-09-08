@@ -1,0 +1,365 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: photo-uploader ECS - cluster, task, service, auto scaling, CodeDeploy
+
+# The two alarms at the bottom are here, not in cloudwatch.yaml, because the
+# deployment group blocks on them and they have to exist first. Everything
+# that only notifies a human is in cloudwatch.yaml.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Naming }
+        Parameters: [ProjectName, AlertTopicArn]
+      - Label: { default: From vpc.yaml }
+        Parameters: [AppSubnetIds, EcsSecurityGroupId]
+      - Label: { default: From s3-cloudfront.yaml and rds.yaml }
+        Parameters: [MediaBucketName, CloudFrontDomain, DbSecretArn]
+      - Label: { default: From iam.yaml }
+        Parameters: [TaskExecutionRoleArn, TaskRoleArn, CodeDeployRoleArn]
+      - Label: { default: From alb.yaml }
+        Parameters:
+          - LoadBalancerFullName
+          - TargetGroupBlueArn
+          - TargetGroupBlueName
+          - TargetGroupGreenName
+          - ProdListenerArn
+          - TestListenerArn
+      - Label: { default: Sizing }
+        Parameters:
+          - ImageUri
+          - ContainerPort
+          - TaskCpu
+          - TaskMemory
+          - DesiredCount
+          - MinCapacity
+          - MaxCapacity
+          - CpuTargetPercent
+          - LogRetentionDays
+
+Parameters:
+  ProjectName: { Type: String }
+
+  AlertTopicArn: { Type: String }
+
+  AppSubnetIds: { Type: List<AWS::EC2::Subnet::Id> }
+
+  EcsSecurityGroupId: { Type: AWS::EC2::SecurityGroup::Id }
+
+  MediaBucketName: { Type: String }
+
+  CloudFrontDomain: { Type: String }
+
+  DbSecretArn: { Type: String }
+
+  TaskExecutionRoleArn: { Type: String }
+
+  TaskRoleArn: { Type: String }
+
+  CodeDeployRoleArn: { Type: String }
+
+  LoadBalancerFullName: { Type: String }
+
+  TargetGroupBlueArn: { Type: String }
+
+  TargetGroupBlueName: { Type: String }
+
+  TargetGroupGreenName: { Type: String }
+
+  ProdListenerArn: { Type: String }
+
+  TestListenerArn: { Type: String }
+
+  ImageUri:
+    Type: String
+    Description: Full image URI including the digest.
+
+  ContainerPort: { Type: Number }
+
+  TaskCpu:
+    Type: String
+    AllowedValues: ['256', '512', '1024']
+
+  TaskMemory:
+    Type: String
+    AllowedValues: ['512', '1024', '2048', '4096']
+
+  DesiredCount:
+    Type: Number
+    Default: 1
+
+  MinCapacity: { Type: Number }
+
+  MaxCapacity: { Type: Number }
+
+  CpuTargetPercent:
+    Type: Number
+    MinValue: 20
+    MaxValue: 90
+
+  LogRetentionDays:
+    Type: Number
+    Default: 14
+
+Resources:
+
+  # --- Logging --------------------------------------------------------------
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: !Sub '/ecs/${ProjectName}'
+      RetentionInDays: !Ref LogRetentionDays
+
+  # --- Cluster and task -----------------------------------------------------
+
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub '${ProjectName}-cluster'
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+      Configuration:
+        ExecuteCommandConfiguration:
+          Logging: DEFAULT
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Ref ProjectName
+      RequiresCompatibilities:
+        - FARGATE
+      NetworkMode: awsvpc
+      Cpu: !Ref TaskCpu
+      # Image decoding makes memory a function of pixels, not of Python.
+      # See MAX_IMAGE_PIXELS in the application repo.
+      Memory: !Ref TaskMemory
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+        CpuArchitecture: X86_64
+      ExecutionRoleArn: !Ref TaskExecutionRoleArn
+      TaskRoleArn: !Ref TaskRoleArn
+      ContainerDefinitions:
+        - Name: app
+          Image: !Ref ImageUri
+          Essential: true
+          # Must exceed the target group's 30s deregistration delay, or a
+          # cutover severs requests the ALB is still draining.
+          StopTimeout: 45
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+              Protocol: tcp
+              Name: http
+              AppProtocol: http
+          Environment:
+            - Name: S3_BUCKET
+              Value: !Ref MediaBucketName
+            - Name: CLOUDFRONT_DOMAIN
+              Value: !Ref CloudFrontDomain
+            - Name: PORT
+              Value: !Ref ContainerPort
+          # Format is arn:json-key:version-stage:version-id, and the two
+          # trailing fields are left empty.
+          Secrets:
+            - Name: DB_HOST
+              ValueFrom: !Sub '${DbSecretArn}:host::'
+            - Name: DB_PORT
+              ValueFrom: !Sub '${DbSecretArn}:port::'
+            - Name: DB_NAME
+              ValueFrom: !Sub '${DbSecretArn}:dbname::'
+            - Name: DB_USER
+              ValueFrom: !Sub '${DbSecretArn}:username::'
+            - Name: DB_PASSWORD
+              ValueFrom: !Sub '${DbSecretArn}:password::'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: app
+          # urllib, not curl: the slim image has none, and adding one just
+          # for a health check is waste.
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - !Sub 'python3 -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen(''http://127.0.0.1:${ContainerPort}/health'',timeout=3).status==200 else 1)"'
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 30
+          LinuxParameters:
+            InitProcessEnabled: true
+
+  # --- Service --------------------------------------------------------------
+
+  Service:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: !Sub '${ProjectName}-service'
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: !Ref DesiredCount
+      LaunchType: FARGATE
+      PlatformVersion: LATEST
+      # From here on CodeDeploy owns task-definition changes, not
+      # CloudFormation. Editing TaskDefinition above will not move the service.
+      DeploymentController:
+        Type: CODE_DEPLOY
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets: !Ref AppSubnetIds
+          SecurityGroups:
+            - !Ref EcsSecurityGroupId
+      LoadBalancers:
+        - ContainerName: app
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref TargetGroupBlueArn
+      HealthCheckGracePeriodSeconds: 60
+      EnableExecuteCommand: true
+      PropagateTags: SERVICE
+
+  # --- Auto scaling ---------------------------------------------------------
+
+  ScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      ServiceNamespace: ecs
+      ScalableDimension: 'ecs:service:DesiredCount'
+      ResourceId: !Sub 'service/${Cluster}/${Service.Name}'
+      MinCapacity: !Ref MinCapacity
+      MaxCapacity: !Ref MaxCapacity
+      # RoleARN omitted: Application Auto Scaling uses its service-linked role.
+
+  CpuScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub '${ProjectName}-cpu-target-tracking'
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: !Ref CpuTargetPercent
+        ScaleOutCooldown: 60
+        ScaleInCooldown: 300
+        DisableScaleIn: false
+
+  # --- Blue/green deployment ------------------------------------------------
+
+  CodeDeployApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ApplicationName: !Sub '${ProjectName}-app'
+      ComputePlatform: ECS
+
+  DeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: !Sub '${ProjectName}-dg'
+      ServiceRoleArn: !Ref CodeDeployRoleArn
+      # Swap for CodeDeployDefault.ECSCanary10Percent5Minutes to shift
+      # traffic gradually instead.
+      DeploymentConfigName: CodeDeployDefault.ECSAllAtOnce
+      DeploymentStyle:
+        DeploymentType: BLUE_GREEN
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+      BlueGreenDeploymentConfiguration:
+        DeploymentReadyOption:
+          ActionOnTimeout: CONTINUE_DEPLOYMENT
+        TerminateBlueInstancesOnDeploymentSuccess:
+          Action: TERMINATE
+          # Old tasks stay alive briefly after cutover so a rollback needs no
+          # cold start.
+          TerminationWaitTimeInMinutes: 5
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events:
+          - DEPLOYMENT_FAILURE
+          - DEPLOYMENT_STOP_ON_ALARM
+      # Without alarms attached, DEPLOYMENT_STOP_ON_ALARM above can never fire.
+      AlarmConfiguration:
+        Enabled: true
+        # If CloudWatch cannot be polled, fail the deployment. Do not deploy blind.
+        IgnorePollAlarmFailure: false
+        Alarms:
+          - Name: !Ref Target5xxAlarm
+          - Name: !Ref HighLatencyAlarm
+      ECSServices:
+        - ClusterName: !Ref Cluster
+          ServiceName: !GetAtt Service.Name
+      LoadBalancerInfo:
+        TargetGroupPairInfoList:
+          - TargetGroups:
+              - Name: !Ref TargetGroupBlueName
+              - Name: !Ref TargetGroupGreenName
+            ProdTrafficRoute:
+              ListenerArns:
+                - !Ref ProdListenerArn
+            TestTrafficRoute:
+              ListenerArns:
+                - !Ref TestListenerArn
+
+  # --- Alarms that gate the cutover -----------------------------------------
+
+  # Keep these fast: an alarm needing fifteen minutes cannot gate a
+  # five-minute deployment.
+  Target5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-target-5xx'
+      AlarmDescription: Application returned 5xx responses
+      Namespace: AWS/ApplicationELB
+      MetricName: HTTPCode_Target_5XX_Count
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !Ref LoadBalancerFullName
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      # No traffic must not read as failure, or a quiet night pages someone.
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopicArn
+      OKActions:
+        - !Ref AlertTopicArn
+
+  HighLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-high-latency'
+      AlarmDescription: p95 response time above two seconds
+      Namespace: AWS/ApplicationELB
+      MetricName: TargetResponseTime
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !Ref LoadBalancerFullName
+      # p95, not Average, which hides the tail.
+      ExtendedStatistic: p95
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 2
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopicArn
+
+Outputs:
+  ClusterName:
+    Value: !Ref Cluster
+
+  ServiceName:
+    Value: !GetAtt Service.Name
+
+  TaskDefinitionFamily:
+    Value: !Ref ProjectName
+
+  CodeDeployApplicationName:
+    Value: !Ref CodeDeployApplication
+
+  CodeDeployDeploymentGroupName:
+    Value: !Ref DeploymentGroup

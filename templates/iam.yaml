@@ -1,0 +1,212 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: photo-uploader IAM - every role the running system assumes
+
+# All workload permissions in one file, so "what can this thing do?" has one
+# answer instead of three. The four roles that exist before any of this is
+# deployed - Git sync, CloudFormation, and the two GitHub Actions roles - are
+# in bootstrap.yaml, because they have to exist before a pipeline can run.
+#
+# Two ARNs below are built with Fn::Sub, not GetAtt, because the
+# resources they name live in codepipeline.yaml, which is deployed after this
+# one. The names are deterministic, so this is safe; changing a name in
+# codepipeline.yaml means changing it here.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Naming }
+        Parameters: [ProjectName]
+      - Label: { default: From s3-cloudfront.yaml and rds.yaml }
+        Parameters: [MediaBucketArn, DbSecretArn]
+      - Label: { default: Source control }
+        Parameters: [ConnectionArn]
+
+Parameters:
+  ProjectName: { Type: String }
+  MediaBucketArn: { Type: String }
+  DbSecretArn: { Type: String }
+  ConnectionArn: { Type: String }
+
+Resources:
+
+  # --- ECS ------------------------------------------------------------------
+
+  # The ECS agent, before the application starts: pull the image, fetch the
+  # secret, create the log stream.
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-task-execution'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: read-db-secret
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 'secretsmanager:GetSecretValue'
+                Resource: !Ref DbSecretArn
+
+  # The application itself. Separate from the execution role so application
+  # code can never pull images or read secrets it was not injected with.
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-task'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: media-bucket-access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Objects under one prefix. Not the bucket, and not ListBucket.
+              - Sid: ObjectsUnderPhotosPrefixOnly
+                Effect: Allow
+                Action:
+                  - 's3:PutObject'
+                  - 's3:GetObject'
+                  - 's3:DeleteObject'
+                Resource: !Sub '${MediaBucketArn}/photos/*'
+        - PolicyName: ecs-exec
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Needed for `aws ecs execute-command`, which is the fastest way
+              # to diagnose a task that cannot reach the database.
+              - Effect: Allow
+                Action:
+                  - 'ssmmessages:CreateControlChannel'
+                  - 'ssmmessages:CreateDataChannel'
+                  - 'ssmmessages:OpenControlChannel'
+                  - 'ssmmessages:OpenDataChannel'
+                Resource: '*'
+
+  # --- Deployment -----------------------------------------------------------
+
+  CodeDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-codedeploy'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codedeploy.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSCodeDeployRoleForECS
+
+  PipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-pipeline'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: pipeline-permissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: Artifacts
+                Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:GetObjectVersion'
+                  - 's3:PutObject'
+                  - 's3:GetBucketLocation'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::${ProjectName}-artifacts-${AWS::AccountId}-${AWS::Region}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${ProjectName}-artifacts-${AWS::AccountId}-${AWS::Region}/*'
+              - Sid: UseGitHubConnection
+                Effect: Allow
+                Action: 'codeconnections:UseConnection'
+                Resource: !Ref ConnectionArn
+              - Sid: ReadEcr
+                Effect: Allow
+                Action:
+                  - 'ecr:DescribeImages'
+                  - 'ecr:GetAuthorizationToken'
+                Resource: '*'
+              - Sid: DriveCodeDeploy
+                Effect: Allow
+                Action:
+                  - 'codedeploy:CreateDeployment'
+                  - 'codedeploy:GetDeployment'
+                  - 'codedeploy:GetDeploymentConfig'
+                  - 'codedeploy:GetApplication'
+                  - 'codedeploy:GetApplicationRevision'
+                  - 'codedeploy:RegisterApplicationRevision'
+                Resource: '*'
+              - Sid: RegisterTaskDefinitions
+                Effect: Allow
+                Action:
+                  - 'ecs:RegisterTaskDefinition'
+                  - 'ecs:DescribeTaskDefinition'
+                  - 'ecs:DescribeServices'
+                Resource: '*'
+              - Sid: PassTaskRoles
+                Effect: Allow
+                Action: 'iam:PassRole'
+                Resource:
+                  - !GetAtt TaskExecutionRole.Arn
+                  - !GetAtt TaskRole.Arn
+                Condition:
+                  StringEquals:
+                    # These roles can go to ECS and nowhere else.
+                    'iam:PassedToService': ecs-tasks.amazonaws.com
+
+  EventBridgeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-eventbridge-pipeline'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: start-pipeline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 'codepipeline:StartPipelineExecution'
+                Resource: !Sub 'arn:${AWS::Partition}:codepipeline:${AWS::Region}:${AWS::AccountId}:${ProjectName}-pipeline'
+
+Outputs:
+  TaskExecutionRoleArn:
+    Value: !GetAtt TaskExecutionRole.Arn
+
+  TaskRoleArn:
+    Value: !GetAtt TaskRole.Arn
+
+  CodeDeployRoleArn:
+    Value: !GetAtt CodeDeployRole.Arn
+
+  PipelineRoleArn:
+    Value: !GetAtt PipelineRole.Arn
+
+  EventBridgeRoleArn:
+    Value: !GetAtt EventBridgeRole.Arn

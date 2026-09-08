@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Read-only by default; only the job that talks to AWS gets more.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate templates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - run: pip install cfn-lint checkov
+
+      - run: cfn-lint bootstrap.yaml main.yaml templates/*.yaml
+
+      - name: Security scan
+        # CKV_AWS_18 is S3 access logging, left off deliberately (see README).
+        # CKV_AWS_21 wants versioning on the artifact bucket, whose contents
+        # expire after 30 days by design.
+        run: |
+          checkov --directory . --framework cloudformation --compact --quiet \
+            --skip-check CKV_AWS_18,CKV_AWS_21
+
+  stage:
+    name: Stage templates
+    needs: validate
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The script compares against the previous commit to decide whether
+          # any template actually moved.
+          fetch-depth: 2
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: ci-${{ github.run_id }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Upload and point the deployment file
+        run: |
+          bash scripts/stage-templates.sh \
+            "${{ secrets.TEMPLATE_BUCKET }}" \
+            "${{ github.sha }}"

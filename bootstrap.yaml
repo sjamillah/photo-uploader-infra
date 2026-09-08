@@ -1,0 +1,573 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: photo-uploader bootstrap - IAM, OIDC, ECR, template staging, alerting
+
+# Created once by hand, then adopted by Git sync like every other stack.
+#
+# The first creation cannot be Git-synced, because this stack is what creates
+# the roles Git sync assumes. After that, deployments/bootstrap-dev.yaml drives
+# it from the repository.
+#
+#   aws cloudformation deploy --stack-name photo-app-bootstrap \
+#     --template-file bootstrap.yaml --capabilities CAPABILITY_NAMED_IAM \
+#     --parameter-overrides GitHubOrg=... AlertEmail=...
+#
+# If a push ever breaks GitSyncRole or CfnDeploymentRole, CloudFormation rolls
+# the update back. Recovery is re-running the command above.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Naming }
+        Parameters: [ProjectName]
+      - Label: { default: Source control }
+        Parameters: [GitHubOrg, GitHubInfraRepo, GitHubAppRepo, GitHubBranch]
+      - Label: { default: Alerting }
+        Parameters: [AlertEmail]
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: photo-app
+    AllowedPattern: '^[a-z][a-z0-9-]{2,20}$'
+
+  GitHubOrg:
+    Type: String
+    Description: Organisation or username that owns both repositories.
+
+  GitHubInfraRepo:
+    Type: String
+    Default: photo-uploader-infra
+
+  GitHubAppRepo:
+    Type: String
+    Default: photo-uploader-app
+
+  GitHubBranch:
+    Type: String
+    Default: main
+    Description: >-
+      The only branch permitted to assume either Actions role. Must match
+      on.push.branches in both workflows and the Git sync branch.
+
+  AlertEmail:
+    Type: String
+    Default: ''
+    Description: Leave blank to create the topic without a subscription.
+
+  CreateOidcProvider:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      IAM allows one provider per URL per account. Leave false if
+      token.actions.githubusercontent.com already exists; the roles below
+      reference it either way. Check with:
+      aws iam list-open-id-connect-providers
+
+Conditions:
+  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, '']]
+  NeedsOidcProvider: !Equals [!Ref CreateOidcProvider, 'true']
+
+Resources:
+
+  # --- Template staging -----------------------------------------------------
+
+  # Nested stacks need an S3 TemplateURL, and Git sync has no packaging step.
+  # CI uploads the children here under the commit SHA.
+  TemplateBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub '${ProjectName}-templates-${AWS::AccountId}-${AWS::Region}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-old-template-sets
+            Status: Enabled
+            ExpirationInDays: 90
+          - Id: expire-noncurrent
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 14
+
+  TemplateBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref TemplateBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt TemplateBucket.Arn
+              - !Sub '${TemplateBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
+
+  # Published so the main stack can find the bucket without the name being
+  # written into the repository, where it would carry the account id.
+  TemplateBucketParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/${ProjectName}/template-bucket'
+      Type: String
+      Value: !Ref TemplateBucket
+      Description: Bucket holding the staged child templates
+
+  # --- Container registry ---------------------------------------------------
+
+  # Lives here, not in the platform child, so an image can be pushed before
+  # the main stack creates the service that needs one.
+  EcrRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref ProjectName
+      ImageTagMutability: MUTABLE
+      EmptyOnDelete: true
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        # Five is the current image plus four rollback targets. Lifecycle
+        # rules do not spare images a task definition still references, so
+        # this is a floor, not a cost decision.
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Expire untagged images after a day",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 1
+                },
+                "action": { "type": "expire" }
+              },
+              {
+                "rulePriority": 2,
+                "description": "Keep the five most recent images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 5
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+
+  # --- Alerting -------------------------------------------------------------
+
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ProjectName}-alerts'
+      DisplayName: !Sub '${ProjectName} alerts'
+      KmsMasterKeyId: alias/aws/sns
+
+  AlertTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref AlertTopic
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudWatchAndEventBridge
+            Effect: Allow
+            Principal:
+              Service:
+                - cloudwatch.amazonaws.com
+                - events.amazonaws.com
+            Action: 'sns:Publish'
+            Resource: !Ref AlertTopic
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+
+  AlertSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlertEmail
+    Properties:
+      TopicArn: !Ref AlertTopic
+      Protocol: email
+      # AWS sends a confirmation link; the subscription is inert until someone
+      # clicks it.
+      Endpoint: !Ref AlertEmail
+
+  # --- GitHub Actions, via OIDC ---------------------------------------------
+
+  # Account-global, so it is created only when the account does not already
+  # have one. The ARN is deterministic either way, which is what the roles use.
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: NeedsOidcProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+
+  GitHubInfraRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-gha-infra'
+      Description: GitHub Actions in the infrastructure repo, staging templates to S3
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - NeedsOidcProvider
+                - !Ref GitHubOidcProvider
+                - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
+            Action: 'sts:AssumeRoleWithWebIdentity'
+            Condition:
+              StringEquals:
+                # Without the aud check, any repository on GitHub could
+                # present a token to this role.
+                'token.actions.githubusercontent.com:aud': sts.amazonaws.com
+              StringLike:
+                # GitHub appends numeric owner and repository IDs so the
+                # claim survives a rename, giving repo:<owner>@<id>/<repo>@<id>.
+                # Both shapes are accepted. The literal @ after the name anchors
+                # the wildcard, so an account whose name merely begins the same
+                # way cannot match.
+                'token.actions.githubusercontent.com:sub':
+                  - !Sub 'repo:${GitHubOrg}/${GitHubInfraRepo}:ref:refs/heads/${GitHubBranch}'
+                  - !Sub 'repo:${GitHubOrg}@*/${GitHubInfraRepo}@*:ref:refs/heads/${GitHubBranch}'
+      Policies:
+        - PolicyName: stage-templates
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:PutObject'
+                  - 's3:DeleteObject'
+                Resource: !Sub '${TemplateBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - 's3:ListBucket'
+                  - 's3:GetBucketLocation'
+                Resource: !GetAtt TemplateBucket.Arn
+
+  GitHubAppRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-gha-app'
+      Description: GitHub Actions in the application repo, pushing images to ECR
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - NeedsOidcProvider
+                - !Ref GitHubOidcProvider
+                - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
+            Action: 'sts:AssumeRoleWithWebIdentity'
+            Condition:
+              StringEquals:
+                'token.actions.githubusercontent.com:aud': sts.amazonaws.com
+              StringLike:
+                # GitHub appends numeric owner and repository IDs so the
+                # claim survives a rename, giving repo:<owner>@<id>/<repo>@<id>.
+                # Both shapes are accepted. The literal @ after the name anchors
+                # the wildcard, so an account whose name merely begins the same
+                # way cannot match.
+                'token.actions.githubusercontent.com:sub':
+                  - !Sub 'repo:${GitHubOrg}/${GitHubAppRepo}:ref:refs/heads/${GitHubBranch}'
+                  - !Sub 'repo:${GitHubOrg}@*/${GitHubAppRepo}@*:ref:refs/heads/${GitHubBranch}'
+      Policies:
+        - PolicyName: ecr-push
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AuthTokenIsAccountWide
+                Effect: Allow
+                Action: 'ecr:GetAuthorizationToken'
+                Resource: '*'
+              - Sid: PushToThisRepositoryOnly
+                Effect: Allow
+                Action:
+                  - 'ecr:BatchCheckLayerAvailability'
+                  - 'ecr:InitiateLayerUpload'
+                  - 'ecr:UploadLayerPart'
+                  - 'ecr:CompleteLayerUpload'
+                  - 'ecr:PutImage'
+                  - 'ecr:BatchGetImage'
+                  - 'ecr:GetDownloadUrlForLayer'
+                  # publish-image.sh reads back the digest it just pushed, so
+                  # Parameter Store records an immutable reference instead of
+                  # a tag that can be moved underneath a deployment.
+                  - 'ecr:DescribeImages'
+                Resource: !GetAtt EcrRepository.Arn
+              - Sid: RecordTheDeployedImage
+                Effect: Allow
+                Action:
+                  - 'ssm:PutParameter'
+                  - 'ssm:GetParameter'
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/image/*'
+
+  # --- CloudFormation and Git sync ------------------------------------------
+
+  # Assumed by CloudFormation to build the stacks. Nothing else can use it.
+  CfnDeploymentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-cfn-deployment'
+      Description: Assumed by CloudFormation to provision the photo-uploader stacks
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+            Action: 'sts:AssumeRole'
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+      Policies:
+        - PolicyName: provision-project-resources
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Broad within each service, but the role cannot reach anything
+              # outside this list.
+              - Sid: ProjectServices
+                Effect: Allow
+                Action:
+                  - 'ec2:*'
+                  - 'ecs:*'
+                  - 'ecr:*'
+                  - 'elasticloadbalancing:*'
+                  - 'rds:*'
+                  - 's3:*'
+                  - 'cloudfront:*'
+                  - 'secretsmanager:*'
+                  - 'logs:*'
+                  - 'cloudwatch:*'
+                  - 'application-autoscaling:*'
+                  - 'codedeploy:*'
+                  - 'codepipeline:*'
+                  - 'codeconnections:*'
+                  - 'codestar-connections:*'
+                  - 'events:*'
+                  - 'sns:*'
+                  - 'cloudformation:*'
+                  - 'ssm:GetParameter'
+                  - 'ssm:GetParameters'
+                  - 'ssm:DescribeParameters'
+                Resource: '*'
+
+              # Everything here encrypts with an AWS managed key, never a
+              # customer key. CloudFormation still needs these when it creates
+              # the encrypted RDS instance and the database secret. ViaService
+              # means the role cannot reach a key on its own.
+              - Sid: EncryptionThroughTheseServicesOnly
+                Effect: Allow
+                Action:
+                  - 'kms:Decrypt'
+                  - 'kms:DescribeKey'
+                  - 'kms:GenerateDataKey'
+                  - 'kms:CreateGrant'
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'kms:ViaService':
+                      - !Sub 'rds.${AWS::Region}.amazonaws.com'
+                      - !Sub 'secretsmanager.${AWS::Region}.amazonaws.com'
+                      - !Sub 's3.${AWS::Region}.amazonaws.com'
+
+              # IAM is scoped by name prefix. Even with ec2:*, a role that
+              # cannot mint arbitrary roles cannot escalate its own privileges.
+              - Sid: ManageProjectRolesOnly
+                Effect: Allow
+                Action:
+                  - 'iam:CreateRole'
+                  - 'iam:DeleteRole'
+                  - 'iam:GetRole'
+                  - 'iam:TagRole'
+                  - 'iam:UntagRole'
+                  - 'iam:ListRoleTags'
+                  - 'iam:AttachRolePolicy'
+                  - 'iam:DetachRolePolicy'
+                  - 'iam:PutRolePolicy'
+                  - 'iam:DeleteRolePolicy'
+                  - 'iam:GetRolePolicy'
+                  - 'iam:ListRolePolicies'
+                  - 'iam:ListAttachedRolePolicies'
+                  - 'iam:UpdateAssumeRolePolicy'
+                  - 'iam:PassRole'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-*'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/*'
+
+              - Sid: ReadOnlyIam
+                Effect: Allow
+                Action:
+                  - 'iam:ListRoles'
+                  - 'iam:ListPolicies'
+                  - 'iam:GetPolicy'
+                  - 'iam:GetPolicyVersion'
+                Resource: '*'
+
+              - Sid: CreateServiceLinkedRoles
+                Effect: Allow
+                Action: 'iam:CreateServiceLinkedRole'
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'iam:AWSServiceName':
+                      - ecs.amazonaws.com
+                      - rds.amazonaws.com
+                      - elasticloadbalancing.amazonaws.com
+                      - ecs.application-autoscaling.amazonaws.com
+
+        # Global services are exempt because their calls carry no regional
+        # context; everything else is confined to the deployment region.
+        - PolicyName: region-lock
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Deny
+                NotAction:
+                  - 'iam:*'
+                  - 'cloudfront:*'
+                  - 'sts:*'
+                  - 's3:GetBucketLocation'
+                  - 'route53:*'
+                  - 'support:*'
+                Resource: '*'
+                Condition:
+                  StringNotEquals:
+                    'aws:RequestedRegion': !Ref AWS::Region
+
+  # Assumed by Git sync to read the repository and drive CloudFormation.
+  GitSyncRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-gitsync'
+      Description: Assumed by CloudFormation Git sync to deploy from the repository
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudformation.sync.codeconnections.amazonaws.com
+            Action: 'sts:AssumeRole'
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+      Policies:
+        - PolicyName: gitsync-operations
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadTheRepository
+                Effect: Allow
+                Action:
+                  - 'codeconnections:UseConnection'
+                  - 'codestar-connections:UseConnection'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:codeconnections:${AWS::Region}:${AWS::AccountId}:connection/*'
+                  - !Sub 'arn:${AWS::Partition}:codestar-connections:${AWS::Region}:${AWS::AccountId}:connection/*'
+              - Sid: DriveCloudFormation
+                Effect: Allow
+                Action:
+                  - 'cloudformation:CreateChangeSet'
+                  - 'cloudformation:DeleteChangeSet'
+                  - 'cloudformation:DescribeChangeSet'
+                  - 'cloudformation:ExecuteChangeSet'
+                  - 'cloudformation:ListChangeSets'
+                  - 'cloudformation:CreateStack'
+                  - 'cloudformation:UpdateStack'
+                  - 'cloudformation:DescribeStacks'
+                  - 'cloudformation:DescribeStackEvents'
+                  - 'cloudformation:DescribeStackResource'
+                  - 'cloudformation:DescribeStackResources'
+                  - 'cloudformation:GetTemplate'
+                  - 'cloudformation:GetTemplateSummary'
+                  - 'cloudformation:ValidateTemplate'
+                  - 'cloudformation:TagResource'
+                  - 'cloudformation:UntagResource'
+                Resource: '*'
+              - Sid: ReadStagedTemplates
+                Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:GetObjectVersion'
+                  - 's3:ListBucket'
+                Resource:
+                  - !GetAtt TemplateBucket.Arn
+                  - !Sub '${TemplateBucket.Arn}/*'
+              - Sid: HandOffToTheDeploymentRole
+                Effect: Allow
+                Action: 'iam:PassRole'
+                Resource: !GetAtt CfnDeploymentRole.Arn
+                Condition:
+                  StringEquals:
+                    'iam:PassedToService': cloudformation.amazonaws.com
+
+Outputs:
+  TemplateBucketName:
+    Description: Set as secret TEMPLATE_BUCKET in the infrastructure repository
+    Value: !Ref TemplateBucket
+    Export:
+      Name: !Sub '${ProjectName}-TemplateBucketName'
+
+  EcrRepositoryUri:
+    Value: !GetAtt EcrRepository.RepositoryUri
+    Export:
+      Name: !Sub '${ProjectName}-EcrRepositoryUri'
+
+  EcrRepositoryName:
+    Value: !Ref EcrRepository
+    Export:
+      Name: !Sub '${ProjectName}-EcrRepositoryName'
+
+  AlertTopicArn:
+    Value: !Ref AlertTopic
+    Export:
+      Name: !Sub '${ProjectName}-AlertTopicArn'
+
+  GitHubInfraRoleArn:
+    Description: Set as secret AWS_ROLE_ARN in the infrastructure repository
+    Value: !GetAtt GitHubInfraRole.Arn
+
+  GitHubAppRoleArn:
+    Description: Set as secret AWS_ROLE_ARN in the application repository
+    Value: !GetAtt GitHubAppRole.Arn
+
+  CfnDeploymentRoleArn:
+    Description: Choose as the stack operations role when creating a synced stack
+    Value: !GetAtt CfnDeploymentRole.Arn
+
+  GitSyncRoleArn:
+    Description: Choose as the Git sync role when creating a synced stack
+    Value: !GetAtt GitSyncRole.Arn

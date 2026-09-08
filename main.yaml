@@ -1,0 +1,297 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: photo-uploader main stack - composes the eight templates in templates/
+
+# Deployed in this order, which CloudFormation works out from the !GetAtt
+# references between them:
+#
+#   vpc.yaml            subnets, routing, VPC endpoints, security groups
+#   s3-cloudfront.yaml  private media bucket behind a distribution
+#   rds.yaml            PostgreSQL and its generated credentials
+#   iam.yaml            every role the running system assumes
+#   alb.yaml            load balancer, target group pair, listeners
+#   ecs.yaml            cluster and service, auto scaling, CodeDeploy
+#   codepipeline.yaml   EventBridge rule, pipeline, artifact bucket
+#   cloudwatch.yaml     alarms that notify, not ones that block
+#
+# ECR is not here. It lives in bootstrap.yaml, because an image has to exist
+# before this stack creates the service that runs one.
+#
+# Values flow down as parameters, so the children use no Fn::ImportValue at
+# all. The three here are the boundary with the bootstrap stack.
+#
+# Defaults live here and nowhere else. A child parameter this file passes has
+# no default of its own, so there is one place to read the current value.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Naming }
+        Parameters: [ProjectName]
+      - Label: { default: Template staging }
+        Parameters: [TemplateBucket, TemplateVersion]
+      - Label: { default: Addressing }
+        Parameters: [VpcCidr, PublicTierCidr, AppTierCidr, DataTierCidr, S3PrefixListId]
+      - Label: { default: Database }
+        Parameters: [DbName, DbInstanceClass, DbEngineVersion, DbMultiAZ]
+      - Label: { default: Application }
+        Parameters:
+          - ImageUri
+          - TriggerImageTag
+          - ContainerPort
+          - TaskCpu
+          - TaskMemory
+          - MinCapacity
+          - MaxCapacity
+          - CpuTargetPercent
+      - Label: { default: Source control }
+        Parameters: [ConnectionArn, GitHubOrg, GitHubAppRepo, GitHubBranch]
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: photo-app
+
+  # Parameter Store keeps anything account-specific out of the repository.
+  # The value supplied is the parameter NAME; CloudFormation resolves it.
+  TemplateBucket:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /photo-app/template-bucket
+
+  TemplateVersion:
+    Type: String
+    AllowedPattern: '^[0-9a-f]{40}$'
+    Description: >-
+      Commit the children were staged under. Rewritten by the stage job
+      in .github/workflows/ci.yml; not edited by hand.
+
+  VpcCidr:
+    Type: String
+    Default: 10.20.0.0/20
+
+  PublicTierCidr:
+    Type: String
+    Default: 10.20.0.0/22
+
+  AppTierCidr:
+    Type: String
+    Default: 10.20.4.0/22
+
+  DataTierCidr:
+    Type: String
+    Default: 10.20.8.0/22
+
+  S3PrefixListId:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /photo-app/s3-prefix-list-id
+
+  DbName:
+    Type: String
+    Default: photos
+
+  DbInstanceClass:
+    Type: String
+    Default: db.t3.micro
+
+  DbEngineVersion:
+    Type: String
+    Default: '16'
+
+  DbMultiAZ:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+
+  ImageUri:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /photo-app/image/current
+    Description: >-
+      The value supplied is the parameter NAME. CloudFormation resolves it to
+      the digest-pinned image URI the build workflow recorded.
+
+  TriggerImageTag:
+    Type: String
+    Default: latest
+    Description: Moving tag the EventBridge rule watches.
+
+  ContainerPort:
+    Type: Number
+    Default: 8080
+
+  TaskCpu:
+    Type: String
+    Default: '512'
+
+  TaskMemory:
+    Type: String
+    Default: '2048'
+
+  MinCapacity:
+    Type: Number
+    Default: 1
+
+  MaxCapacity:
+    Type: Number
+    Default: 4
+
+  CpuTargetPercent:
+    Type: Number
+    Default: 60
+
+  ConnectionArn:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /photo-app/connection-arn
+
+  GitHubOrg:
+    Type: String
+
+  GitHubAppRepo:
+    Type: String
+    Default: photo-uploader-app
+
+  GitHubBranch:
+    Type: String
+    Default: main
+
+Resources:
+
+  VpcStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://${TemplateBucket}.s3.${AWS::Region}.amazonaws.com/${TemplateVersion}/vpc.yaml'
+      TimeoutInMinutes: 20
+      Parameters:
+        ProjectName: !Ref ProjectName
+        VpcCidr: !Ref VpcCidr
+        PublicTierCidr: !Ref PublicTierCidr
+        AppTierCidr: !Ref AppTierCidr
+        DataTierCidr: !Ref DataTierCidr
+        S3PrefixListId: !Ref S3PrefixListId
+
+  S3CloudFrontStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://${TemplateBucket}.s3.${AWS::Region}.amazonaws.com/${TemplateVersion}/s3-cloudfront.yaml'
+      TimeoutInMinutes: 30
+      Parameters:
+        ProjectName: !Ref ProjectName
+
+  RdsStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://${TemplateBucket}.s3.${AWS::Region}.amazonaws.com/${TemplateVersion}/rds.yaml'
+      # Multi-AZ PostgreSQL is the slow one; everything else finishes inside this.
+      TimeoutInMinutes: 45
+      Parameters:
+        ProjectName: !Ref ProjectName
+        DataSubnetIds: !GetAtt VpcStack.Outputs.PrivateDataSubnets
+        RdsSecurityGroupId: !GetAtt VpcStack.Outputs.RdsSecurityGroupId
+        DbName: !Ref DbName
+        DbInstanceClass: !Ref DbInstanceClass
+        DbEngineVersion: !Ref DbEngineVersion
+        DbMultiAZ: !Ref DbMultiAZ
+
+  IamStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://${TemplateBucket}.s3.${AWS::Region}.amazonaws.com/${TemplateVersion}/iam.yaml'
+      TimeoutInMinutes: 15
+      Parameters:
+        ProjectName: !Ref ProjectName
+        MediaBucketArn: !GetAtt S3CloudFrontStack.Outputs.MediaBucketArn
+        DbSecretArn: !GetAtt RdsStack.Outputs.DbSecretArn
+        ConnectionArn: !Ref ConnectionArn
+
+  AlbStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://${TemplateBucket}.s3.${AWS::Region}.amazonaws.com/${TemplateVersion}/alb.yaml'
+      TimeoutInMinutes: 20
+      Parameters:
+        ProjectName: !Ref ProjectName
+        VpcId: !GetAtt VpcStack.Outputs.VpcId
+        PublicSubnetIds: !GetAtt VpcStack.Outputs.PublicSubnets
+        AlbSecurityGroupId: !GetAtt VpcStack.Outputs.AlbSecurityGroupId
+        ContainerPort: !Ref ContainerPort
+
+  EcsStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://${TemplateBucket}.s3.${AWS::Region}.amazonaws.com/${TemplateVersion}/ecs.yaml'
+      TimeoutInMinutes: 30
+      Parameters:
+        ProjectName: !Ref ProjectName
+        AlertTopicArn: {'Fn::ImportValue': !Sub '${ProjectName}-AlertTopicArn'}
+        AppSubnetIds: !GetAtt VpcStack.Outputs.PrivateAppSubnets
+        EcsSecurityGroupId: !GetAtt VpcStack.Outputs.EcsSecurityGroupId
+        MediaBucketName: !GetAtt S3CloudFrontStack.Outputs.MediaBucketName
+        CloudFrontDomain: !GetAtt S3CloudFrontStack.Outputs.CloudFrontDomain
+        DbSecretArn: !GetAtt RdsStack.Outputs.DbSecretArn
+        TaskExecutionRoleArn: !GetAtt IamStack.Outputs.TaskExecutionRoleArn
+        TaskRoleArn: !GetAtt IamStack.Outputs.TaskRoleArn
+        CodeDeployRoleArn: !GetAtt IamStack.Outputs.CodeDeployRoleArn
+        LoadBalancerFullName: !GetAtt AlbStack.Outputs.LoadBalancerFullName
+        TargetGroupBlueArn: !GetAtt AlbStack.Outputs.TargetGroupBlueArn
+        TargetGroupBlueName: !GetAtt AlbStack.Outputs.TargetGroupBlueName
+        TargetGroupGreenName: !GetAtt AlbStack.Outputs.TargetGroupGreenName
+        ProdListenerArn: !GetAtt AlbStack.Outputs.ProdListenerArn
+        TestListenerArn: !GetAtt AlbStack.Outputs.TestListenerArn
+        ImageUri: !Ref ImageUri
+        ContainerPort: !Ref ContainerPort
+        TaskCpu: !Ref TaskCpu
+        TaskMemory: !Ref TaskMemory
+        MinCapacity: !Ref MinCapacity
+        MaxCapacity: !Ref MaxCapacity
+        CpuTargetPercent: !Ref CpuTargetPercent
+
+  CodePipelineStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://${TemplateBucket}.s3.${AWS::Region}.amazonaws.com/${TemplateVersion}/codepipeline.yaml'
+      TimeoutInMinutes: 20
+      Parameters:
+        ProjectName: !Ref ProjectName
+        AlertTopicArn: {'Fn::ImportValue': !Sub '${ProjectName}-AlertTopicArn'}
+        ConnectionArn: !Ref ConnectionArn
+        GitHubOrg: !Ref GitHubOrg
+        GitHubAppRepo: !Ref GitHubAppRepo
+        GitHubBranch: !Ref GitHubBranch
+        PipelineRoleArn: !GetAtt IamStack.Outputs.PipelineRoleArn
+        EventBridgeRoleArn: !GetAtt IamStack.Outputs.EventBridgeRoleArn
+        EcrRepositoryName: {'Fn::ImportValue': !Sub '${ProjectName}-EcrRepositoryName'}
+        TriggerImageTag: !Ref TriggerImageTag
+        CodeDeployApplicationName: !GetAtt EcsStack.Outputs.CodeDeployApplicationName
+        CodeDeployDeploymentGroupName: !GetAtt EcsStack.Outputs.CodeDeployDeploymentGroupName
+
+  CloudWatchStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://${TemplateBucket}.s3.${AWS::Region}.amazonaws.com/${TemplateVersion}/cloudwatch.yaml'
+      TimeoutInMinutes: 15
+      Parameters:
+        ProjectName: !Ref ProjectName
+        AlertTopicArn: {'Fn::ImportValue': !Sub '${ProjectName}-AlertTopicArn'}
+        DbInstanceIdentifier: !GetAtt RdsStack.Outputs.DbInstanceIdentifier
+        LoadBalancerFullName: !GetAtt AlbStack.Outputs.LoadBalancerFullName
+        TargetGroupBlueFullName: !GetAtt AlbStack.Outputs.TargetGroupBlueFullName
+        ClusterName: !GetAtt EcsStack.Outputs.ClusterName
+        ServiceName: !GetAtt EcsStack.Outputs.ServiceName
+        MaxCapacity: !Ref MaxCapacity
+
+Outputs:
+  ApplicationUrl:
+    Description: Public application endpoint
+    Value: !Sub
+      - 'http://${Dns}'
+      - Dns: !GetAtt AlbStack.Outputs.DnsName
+
+  CloudFrontDomain:
+    Value: !GetAtt S3CloudFrontStack.Outputs.CloudFrontDomain
+
+  ClusterName:
+    Value: !GetAtt EcsStack.Outputs.ClusterName
+
+  ServiceName:
+    Value: !GetAtt EcsStack.Outputs.ServiceName
+
+  PipelineName:
+    Value: !GetAtt CodePipelineStack.Outputs.PipelineName

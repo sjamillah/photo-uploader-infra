@@ -1,0 +1,129 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::LanguageExtensions
+Description: photo-uploader load balancer - ALB, target group pair, listeners
+
+# Separate from the service because CodeDeploy owns the relationship between
+# them: it swaps which target group the production listener forwards to, and
+# that swap is the blue/green cutover.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Naming }
+        Parameters: [ProjectName]
+      - Label: { default: From vpc.yaml }
+        Parameters: [VpcId, PublicSubnetIds, AlbSecurityGroupId]
+      - Label: { default: Targets }
+        Parameters: [ContainerPort]
+
+Parameters:
+  ProjectName: { Type: String }
+  VpcId: { Type: AWS::EC2::VPC::Id }
+  PublicSubnetIds: { Type: List<AWS::EC2::Subnet::Id> }
+  AlbSecurityGroupId: { Type: AWS::EC2::SecurityGroup::Id }
+  ContainerPort: { Type: Number }
+
+Resources:
+
+  # --- Load balancer --------------------------------------------------------
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${ProjectName}-alb'
+      Type: application
+      Scheme: internet-facing
+      IpAddressType: ipv4
+      Subnets: !Ref PublicSubnetIds
+      SecurityGroups:
+        - !Ref AlbSecurityGroupId
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '60'
+        # Rejects malformed headers instead of forwarding them, which closes
+        # off a class of request-smuggling attacks.
+        - Key: routing.http.drop_invalid_header_fields.enabled
+          Value: 'true'
+        - Key: deletion_protection.enabled
+          Value: 'false'
+        - Key: routing.http.x_amzn_tls_version_and_cipher_suite.enabled
+          Value: 'true'
+
+  # --- Target groups --------------------------------------------------------
+
+  # Identical by design: CodeDeploy moves traffic between them, so any
+  # difference would change behaviour depending on which one is live.
+  Fn::ForEach::TargetGroups:
+    - Colour
+    - [Blue, Green]
+    - TargetGroup${Colour}:
+        Type: AWS::ElasticLoadBalancingV2::TargetGroup
+        Properties:
+          Name: !Sub '${ProjectName}-tg-${Colour}'
+          VpcId: !Ref VpcId
+          TargetType: ip
+          Protocol: HTTP
+          Port: !Ref ContainerPort
+          HealthCheckProtocol: HTTP
+          HealthCheckPath: /health
+          HealthCheckIntervalSeconds: 15
+          HealthCheckTimeoutSeconds: 5
+          HealthyThresholdCount: 2
+          UnhealthyThresholdCount: 3
+          Matcher:
+            HttpCode: '200'
+          TargetGroupAttributes:
+            # The 300s default would leave a cutover draining for five
+            # minutes with nothing left to drain.
+            - Key: deregistration_delay.timeout_seconds
+              Value: '30'
+
+  # --- Listeners ------------------------------------------------------------
+
+  ProdListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroupBlue
+
+  # CodeDeploy validates the replacement task set here before shifting
+  # production. Unreachable from outside: the ALB group only opens :80.
+  TestListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Protocol: HTTP
+      Port: 8080
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroupGreen
+
+Outputs:
+  DnsName:
+    Value: !GetAtt LoadBalancer.DNSName
+
+  LoadBalancerFullName:
+    Description: The dimension value CloudWatch wants, not the ARN
+    Value: !GetAtt LoadBalancer.LoadBalancerFullName
+
+  TargetGroupBlueArn:
+    Value: !Ref TargetGroupBlue
+
+  TargetGroupBlueName:
+    Value: !GetAtt TargetGroupBlue.TargetGroupName
+
+  TargetGroupGreenName:
+    Value: !GetAtt TargetGroupGreen.TargetGroupName
+
+  TargetGroupBlueFullName:
+    Value: !GetAtt TargetGroupBlue.TargetGroupFullName
+
+  ProdListenerArn:
+    Value: !Ref ProdListener
+
+  TestListenerArn:
+    Value: !Ref TestListener

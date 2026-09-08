@@ -1,0 +1,109 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: photo-uploader database - PostgreSQL and its generated credentials
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Naming }
+        Parameters: [ProjectName]
+      - Label: { default: From the VPC template }
+        Parameters: [DataSubnetIds, RdsSecurityGroupId]
+      - Label: { default: Database }
+        Parameters: [DbName, DbInstanceClass, DbEngineVersion, DbMultiAZ]
+
+Parameters:
+  ProjectName: { Type: String }
+
+  DataSubnetIds: { Type: List<AWS::EC2::Subnet::Id> }
+
+  RdsSecurityGroupId: { Type: AWS::EC2::SecurityGroup::Id }
+
+  DbName:
+    Type: String
+    Default: photos
+
+  DbInstanceClass:
+    Type: String
+    AllowedValues: [db.t3.micro, db.t3.small, db.t3.medium]
+
+  DbEngineVersion:
+    Type: String
+    Description: Major version only; RDS picks the latest supported minor.
+
+  DbMultiAZ:
+    Type: String
+    AllowedValues: ['true', 'false']
+
+Resources:
+
+  # --- Database -------------------------------------------------------------
+
+  DbSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${ProjectName}/db'
+      Description: PostgreSQL master credentials, generated and never seen by a human
+      GenerateSecretString:
+        SecretStringTemplate: '{"username":"photoadmin"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        # RDS rejects these, and the slash and colon break libpq URIs.
+        ExcludeCharacters: '"@/\ '
+
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Sub '${ProjectName} isolated data subnets'
+      SubnetIds: !Ref DataSubnetIds
+
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub '${ProjectName}-db'
+      Engine: postgres
+      EngineVersion: !Ref DbEngineVersion
+      DBInstanceClass: !Ref DbInstanceClass
+      DBName: !Ref DbName
+      # Dynamic references, so the password never appears in the template, the
+      # console, or a stack event.
+      MasterUsername: !Sub '{{resolve:secretsmanager:${DbSecret}:SecretString:username}}'
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${DbSecret}:SecretString:password}}'
+      AllocatedStorage: '20'
+      MaxAllocatedStorage: 100
+      StorageType: gp3
+      StorageEncrypted: true
+      MultiAZ: !Ref DbMultiAZ
+      PubliclyAccessible: false
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VPCSecurityGroups:
+        - !Ref RdsSecurityGroupId
+      BackupRetentionPeriod: 7
+      PreferredBackupWindow: '02:00-03:00'
+      PreferredMaintenanceWindow: 'sun:03:30-sun:04:30'
+      AutoMinorVersionUpgrade: true
+      CopyTagsToSnapshot: true
+      DeletionProtection: false
+      EnableCloudwatchLogsExports:
+        - postgresql
+
+  # Writes host, port and dbname into the secret. Without it the task
+  # definition's DB_HOST reference points at a key that does not exist.
+  DbSecretAttachment:
+    Type: AWS::SecretsManager::SecretTargetAttachment
+    Properties:
+      SecretId: !Ref DbSecret
+      TargetId: !Ref Database
+      TargetType: AWS::RDS::DBInstance
+
+Outputs:
+  DbSecretArn:
+    Value: !Ref DbSecret
+
+  DbEndpoint:
+    Value: !GetAtt Database.Endpoint.Address
+
+  DbInstanceIdentifier:
+    Description: Dimension value for the alarms in cloudwatch.yaml
+    Value: !Ref Database

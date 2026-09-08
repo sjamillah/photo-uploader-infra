@@ -1,0 +1,18 @@
+template-file-path: main.yaml
+
+# Only what main.yaml cannot work out for itself. Anything account-specific
+# is read from Parameter Store by the template, so it never lands in git.
+parameters:
+  ProjectName: photo-app
+
+  # Managed by the stage job in .github/workflows/ci.yml.
+  TemplateVersion: 0000000000000000000000000000000000000000
+
+  GitHubOrg: sjamillah
+
+tags:
+  Project: photo-uploader
+  Environment: dev
+  Owner: jamillah.ssozi
+  ManagedBy: cloudformation-gitsync
+  CostCentre: training
