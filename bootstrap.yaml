@@ -32,19 +32,30 @@ Parameters:
 
   GitHubOrg:
     Type: String
+    AllowedPattern: '^[A-Za-z0-9][A-Za-z0-9-]{0,38}$'
+    ConstraintDescription: >-
+      A GitHub account name. Case matters: it has to match the owner in the
+      repository URL exactly, because the OIDC subject claim is compared with
+      StringLike and no case folding.
     Description: Organisation or username that owns both repositories.
 
   GitHubInfraRepo:
     Type: String
     Default: photo-uploader-infra
+    AllowedPattern: '^[A-Za-z0-9._-]{1,100}$'
+    ConstraintDescription: A repository name on its own, not a full URL.
 
   GitHubAppRepo:
     Type: String
     Default: photo-uploader-app
+    AllowedPattern: '^[A-Za-z0-9._-]{1,100}$'
+    ConstraintDescription: A repository name on its own, not a full URL.
 
   GitHubBranch:
     Type: String
     Default: main
+    AllowedPattern: '^[A-Za-z0-9._/-]{1,255}$'
+    ConstraintDescription: A branch name, with no refs/heads/ prefix.
     Description: >-
       The only branch permitted to assume either Actions role. Must match
       on.push.branches in both workflows and the Git sync branch.
@@ -52,6 +63,8 @@ Parameters:
   AlertEmail:
     Type: String
     Default: ''
+    AllowedPattern: '^$|^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$'
+    ConstraintDescription: An email address, or blank for no subscription.
     Description: Leave blank to create the topic without a subscription.
 
   CreateOidcProvider:

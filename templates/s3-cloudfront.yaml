@@ -115,6 +115,3 @@ Outputs:
 
   CloudFrontDomain:
     Value: !GetAtt Distribution.DomainName
-
-  DistributionId:
-    Value: !Ref Distribution

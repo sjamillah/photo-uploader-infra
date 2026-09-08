@@ -1,40 +1,12 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: photo-uploader ECS - cluster, task, service, auto scaling, CodeDeploy
+Transform: AWS::LanguageExtensions
+Description: >-
+  photo-uploader application tier - load balancer, target group pair,
+  listeners, ECS cluster, task, service, auto scaling, CodeDeploy
 
 # The two alarms at the bottom are here, not in cloudwatch.yaml, because the
 # deployment group blocks on them and they have to exist first. Everything
 # that only notifies a human is in cloudwatch.yaml.
-
-Metadata:
-  AWS::CloudFormation::Interface:
-    ParameterGroups:
-      - Label: { default: Naming }
-        Parameters: [ProjectName, AlertTopicArn]
-      - Label: { default: From vpc.yaml }
-        Parameters: [AppSubnetIds, EcsSecurityGroupId]
-      - Label: { default: From s3-cloudfront.yaml and rds.yaml }
-        Parameters: [MediaBucketName, CloudFrontDomain, DbSecretArn]
-      - Label: { default: From iam.yaml }
-        Parameters: [TaskExecutionRoleArn, TaskRoleArn, CodeDeployRoleArn]
-      - Label: { default: From alb.yaml }
-        Parameters:
-          - LoadBalancerFullName
-          - TargetGroupBlueArn
-          - TargetGroupBlueName
-          - TargetGroupGreenName
-          - ProdListenerArn
-          - TestListenerArn
-      - Label: { default: Sizing }
-        Parameters:
-          - ImageUri
-          - ContainerPort
-          - TaskCpu
-          - TaskMemory
-          - DesiredCount
-          - MinCapacity
-          - MaxCapacity
-          - CpuTargetPercent
-          - LogRetentionDays
 
 Parameters:
   ProjectName: { Type: String }
@@ -57,17 +29,11 @@ Parameters:
 
   CodeDeployRoleArn: { Type: String }
 
-  LoadBalancerFullName: { Type: String }
+  VpcId: { Type: AWS::EC2::VPC::Id }
 
-  TargetGroupBlueArn: { Type: String }
+  PublicSubnetIds: { Type: List<AWS::EC2::Subnet::Id> }
 
-  TargetGroupBlueName: { Type: String }
-
-  TargetGroupGreenName: { Type: String }
-
-  ProdListenerArn: { Type: String }
-
-  TestListenerArn: { Type: String }
+  AlbSecurityGroupId: { Type: AWS::EC2::SecurityGroup::Id }
 
   ImageUri:
     Type: String
@@ -101,6 +67,85 @@ Parameters:
     Default: 14
 
 Resources:
+
+
+  # --- Load balancer --------------------------------------------------------
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${ProjectName}-alb'
+      Type: application
+      Scheme: internet-facing
+      IpAddressType: ipv4
+      Subnets: !Ref PublicSubnetIds
+      SecurityGroups:
+        - !Ref AlbSecurityGroupId
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '60'
+        # Rejects malformed headers instead of forwarding them, which closes
+        # off a class of request-smuggling attacks.
+        - Key: routing.http.drop_invalid_header_fields.enabled
+          Value: 'true'
+        - Key: deletion_protection.enabled
+          Value: 'false'
+        - Key: routing.http.x_amzn_tls_version_and_cipher_suite.enabled
+          Value: 'true'
+
+  # --- Target groups --------------------------------------------------------
+
+  # Identical by design: CodeDeploy moves traffic between them, so any
+  # difference would change behaviour depending on which one is live.
+  Fn::ForEach::TargetGroups:
+    - Colour
+    - [Blue, Green]
+    - TargetGroup${Colour}:
+        Type: AWS::ElasticLoadBalancingV2::TargetGroup
+        Properties:
+          Name: !Sub '${ProjectName}-tg-${Colour}'
+          VpcId: !Ref VpcId
+          TargetType: ip
+          Protocol: HTTP
+          Port: !Ref ContainerPort
+          HealthCheckProtocol: HTTP
+          HealthCheckPath: /health
+          HealthCheckIntervalSeconds: 15
+          HealthCheckTimeoutSeconds: 5
+          HealthyThresholdCount: 2
+          UnhealthyThresholdCount: 3
+          Matcher:
+            HttpCode: '200'
+          TargetGroupAttributes:
+            # The 300s default would leave a cutover draining for five
+            # minutes with nothing left to drain.
+            - Key: deregistration_delay.timeout_seconds
+              Value: '30'
+
+  # --- Listeners ------------------------------------------------------------
+
+  ProdListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroupBlue
+
+  # CodeDeploy validates the replacement task set here before shifting
+  # production. Unreachable from outside: the ALB group only opens :80.
+  TestListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Protocol: HTTP
+      Port: 8080
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroupGreen
+
 
   # --- Logging --------------------------------------------------------------
 
@@ -195,6 +240,9 @@ Resources:
 
   Service:
     Type: AWS::ECS::Service
+    # ECS rejects a target group that is not yet attached to a listener.
+    # Across two stacks the ordering was implicit; in one it has to be said.
+    DependsOn: ProdListener
     Properties:
       ServiceName: !Sub '${ProjectName}-service'
       Cluster: !Ref Cluster
@@ -215,7 +263,7 @@ Resources:
       LoadBalancers:
         - ContainerName: app
           ContainerPort: !Ref ContainerPort
-          TargetGroupArn: !Ref TargetGroupBlueArn
+          TargetGroupArn: !Ref TargetGroupBlue
       HealthCheckGracePeriodSeconds: 60
       EnableExecuteCommand: true
       PropagateTags: SERVICE
@@ -293,14 +341,14 @@ Resources:
       LoadBalancerInfo:
         TargetGroupPairInfoList:
           - TargetGroups:
-              - Name: !Ref TargetGroupBlueName
-              - Name: !Ref TargetGroupGreenName
+              - Name: !GetAtt TargetGroupBlue.TargetGroupName
+              - Name: !GetAtt TargetGroupGreen.TargetGroupName
             ProdTrafficRoute:
               ListenerArns:
-                - !Ref ProdListenerArn
+                - !Ref ProdListener
             TestTrafficRoute:
               ListenerArns:
-                - !Ref TestListenerArn
+                - !Ref TestListener
 
   # --- Alarms that gate the cutover -----------------------------------------
 
@@ -315,7 +363,7 @@ Resources:
       MetricName: HTTPCode_Target_5XX_Count
       Dimensions:
         - Name: LoadBalancer
-          Value: !Ref LoadBalancerFullName
+          Value: !GetAtt LoadBalancer.LoadBalancerFullName
       Statistic: Sum
       Period: 60
       EvaluationPeriods: 2
@@ -337,7 +385,7 @@ Resources:
       MetricName: TargetResponseTime
       Dimensions:
         - Name: LoadBalancer
-          Value: !Ref LoadBalancerFullName
+          Value: !GetAtt LoadBalancer.LoadBalancerFullName
       # p95, not Average, which hides the tail.
       ExtendedStatistic: p95
       Period: 60
@@ -355,11 +403,18 @@ Outputs:
   ServiceName:
     Value: !GetAtt Service.Name
 
-  TaskDefinitionFamily:
-    Value: !Ref ProjectName
-
   CodeDeployApplicationName:
     Value: !Ref CodeDeployApplication
 
   CodeDeployDeploymentGroupName:
     Value: !Ref DeploymentGroup
+
+  DnsName:
+    Value: !GetAtt LoadBalancer.DNSName
+
+  LoadBalancerFullName:
+    Description: The dimension value CloudWatch wants, not the ARN
+    Value: !GetAtt LoadBalancer.LoadBalancerFullName
+
+  TargetGroupBlueFullName:
+    Value: !GetAtt TargetGroupBlue.TargetGroupFullName

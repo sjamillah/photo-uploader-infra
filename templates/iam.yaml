@@ -11,16 +11,6 @@ Description: photo-uploader IAM - every role the running system assumes
 # one. The names are deterministic, so this is safe; changing a name in
 # codepipeline.yaml means changing it here.
 
-Metadata:
-  AWS::CloudFormation::Interface:
-    ParameterGroups:
-      - Label: { default: Naming }
-        Parameters: [ProjectName]
-      - Label: { default: From s3-cloudfront.yaml and rds.yaml }
-        Parameters: [MediaBucketArn, DbSecretArn]
-      - Label: { default: Source control }
-        Parameters: [ConnectionArn]
-
 Parameters:
   ProjectName: { Type: String }
   MediaBucketArn: { Type: String }

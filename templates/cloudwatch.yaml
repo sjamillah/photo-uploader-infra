@@ -8,20 +8,6 @@ Description: photo-uploader CloudWatch alarms - the ones that notify, not the on
 # Deployed last, since the dimensions come from the database, the load
 # balancer and the service.
 
-Metadata:
-  AWS::CloudFormation::Interface:
-    ParameterGroups:
-      - Label: { default: Naming }
-        Parameters: [ProjectName, AlertTopicArn]
-      - Label: { default: 'Dimensions from rds.yaml, alb.yaml and ecs.yaml' }
-        Parameters:
-          - DbInstanceIdentifier
-          - LoadBalancerFullName
-          - TargetGroupBlueFullName
-          - ClusterName
-          - ServiceName
-          - MaxCapacity
-
 Parameters:
   ProjectName: { Type: String }
   AlertTopicArn: { Type: String }

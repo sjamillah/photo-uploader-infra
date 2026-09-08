@@ -1,22 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: photo-uploader CodePipeline - EventBridge trigger and CodeDeploy hand-off
 
-Metadata:
-  AWS::CloudFormation::Interface:
-    ParameterGroups:
-      - Label: { default: Naming }
-        Parameters: [ProjectName, AlertTopicArn]
-      - Label: { default: Source control }
-        Parameters: [ConnectionArn, GitHubOrg, GitHubAppRepo, GitHubBranch]
-      - Label: { default: From iam.yaml }
-        Parameters: [PipelineRoleArn, EventBridgeRoleArn]
-      - Label: { default: From bootstrap.yaml and ecs.yaml }
-        Parameters:
-          - EcrRepositoryName
-          - TriggerImageTag
-          - CodeDeployApplicationName
-          - CodeDeployDeploymentGroupName
-
 Parameters:
   ProjectName: { Type: String }
 
@@ -204,9 +188,3 @@ Resources:
 Outputs:
   PipelineName:
     Value: !Ref Pipeline
-
-  ArtifactBucketName:
-    Value: !Ref ArtifactBucket
-
-  EventRuleName:
-    Value: !Ref EcrPushRule

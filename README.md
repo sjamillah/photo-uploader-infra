@@ -46,7 +46,6 @@ its own.
 | `templates/s3-cloudfront.yaml` | Private media bucket behind a distribution |
 | `templates/rds.yaml` | PostgreSQL and its generated credentials |
 | `templates/iam.yaml` | Every role the running system assumes |
-| `templates/alb.yaml` | Load balancer, target group pair, listeners |
 | `templates/ecs.yaml` | ECS cluster and service, auto scaling, CodeDeploy |
 | `templates/codepipeline.yaml` | EventBridge rule, CodePipeline, artifact bucket |
 | `templates/cloudwatch.yaml` | Alarms that notify, not ones that block |
@@ -80,7 +79,7 @@ prints its contents. Roughly:
 | VPC endpoints | `vpc.yaml` | VPC endpoints |
 | Bucket policy, CloudFront, RDS | `s3-cloudfront.yaml` and `rds.yaml` | Media storage, Database |
 | Any role or policy | `iam.yaml`, `bootstrap.yaml` | see the table below |
-| ALB, listeners, target groups | `alb.yaml` | Load balancer, Listeners |
+| ALB, listeners, target groups | `ecs.yaml` | Load balancer, Listeners |
 | Task definition, scaling | `ecs.yaml` | Cluster and task, Auto scaling |
 | Blue/green configuration | `ecs.yaml` | Blue/green deployment |
 | Gating alarms | `ecs.yaml` | Alarms that gate the cutover |
@@ -147,17 +146,19 @@ matching OIDC token, and there are no AWS access keys anywhere in either repo.
 They are secrets so that nothing identifying the account is echoed into a
 public build log.
 
-**3. Create the GitHub connection.** Developer Tools → Settings →
-Connections → Create connection → GitHub, granting access to both repos. It is
-born `PENDING` and needs an interactive OAuth handshake to become `AVAILABLE`,
+**3. Create the GitHub connection.** Developer Tools → Connections → Create
+connection → GitHub, granting access to both repositories. It is born
+`PENDING` and needs an interactive OAuth handshake to become `AVAILABLE`,
 which is the one step in this build with no API.
 
 **4. Put the two remaining values in Parameter Store.** Bootstrap publishes
-`/photo-app/template-bucket` itself; these two it cannot work out:
+`/photo-app/template-bucket` itself. These two have no CloudFormation source:
+the connection ARN only exists once a person has authorised it, and the prefix
+list id is assigned by AWS per region with no resource that returns it.
 
 ```bash
 aws ssm put-parameter --name /photo-app/connection-arn --type String \
-  --overwrite --value "arn:aws:codeconnections:eu-west-1:<account>:connection/<id>"
+  --overwrite --value "<the ARN from Developer Tools, Connections>"
 
 aws ssm put-parameter --name /photo-app/s3-prefix-list-id --type String \
   --overwrite --value "$(aws ec2 describe-managed-prefix-lists \
@@ -165,7 +166,9 @@ aws ssm put-parameter --name /photo-app/s3-prefix-list-id --type String \
     --query 'PrefixLists[0].PrefixListId' --output text)"
 ```
 
-This is why the repository stays clean: the root template reads both by name.
+`/photo-app/image/current` is written by the application pipeline and stays
+that way. Creating it here would mean every bootstrap update reset it to a
+placeholder, rolling ECS back to an image that does not exist.
 
 **5. Push the application.** CI tests and pushes an image, then records
 its digest at `/photo-app/image/current`.
@@ -288,7 +291,7 @@ the workflow again. Only `upload` is granted `id-token: write`.
 
 ## Two loops
 
-`vpc.yaml` and `alb.yaml` use `Transform: AWS::LanguageExtensions` and
+`vpc.yaml` and `ecs.yaml` use `Transform: AWS::LanguageExtensions` and
 `Fn::ForEach` for the five interface endpoints and the two target groups,
 which were otherwise five and two near-identical blocks.
 
@@ -317,15 +320,15 @@ goes quietly stale every time a template moves.
 | Criterion | Built in | Evidence to capture |
 |---|---|---|
 | Multi-AZ VPC, subnet design | `vpc.yaml` | VPC resource map; six subnets, three tiers, two AZs |
-| Private ECS, VPC endpoints, public ALB | `vpc.yaml`, `alb.yaml`, `ecs.yaml` | Private route tables with no `0.0.0.0/0`; `AssignPublicIp: DISABLED`; internet-facing ALB |
+| Private ECS, VPC endpoints, public ALB | `vpc.yaml`, `ecs.yaml` | Private route tables with no `0.0.0.0/0`; `AssignPublicIp: DISABLED`; internet-facing ALB |
 | CloudFront and private S3 with OAC | `s3-cloudfront.yaml` and `rds.yaml` | 200 through CloudFront next to 403 direct to S3 |
 | All resources via CloudFormation Git sync | `bootstrap.yaml`, `templates/` | Git sync tab showing a commit SHA on **both** stacks; the main stack's Resources tab listing eight nested children |
 | GitHub Actions builds the image | app `ci.yml` | Green `build` job |
 | Image pushed to ECR | app `ci.yml` | `describe-images` showing the SHA and `latest` tags |
 | OIDC authentication | `bootstrap.yaml` | The trust policy, and Settings showing no AWS access keys in either repo |
 | EventBridge detects the push | `codepipeline.yaml` | The rule's event pattern, and a pipeline execution whose trigger was the event |
-| Application reachable via ALB | `alb.yaml` | The URL, serving the gallery |
-| Tasks pass ALB health checks | `alb.yaml` | `photo-app-tg-blue` with a healthy target |
+| Application reachable via ALB | `ecs.yaml` | The URL, serving the gallery |
+| Tasks pass ALB health checks | `ecs.yaml` | `photo-app-tg-blue` with a healthy target |
 | Logs in CloudWatch | `ecs.yaml` | `/ecs/photo-app` with request lines |
 | Auto scaling 1 to 4 | `main.yaml`, `ecs.yaml` | Scaling policy, and desired count moving under load |
 | Blue/green works | `ecs.yaml`, `codepipeline.yaml` | CodeDeploy at 100% on green, and a poll of production showing no failed request |

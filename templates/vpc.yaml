@@ -12,16 +12,6 @@ Mappings:
     SecretsManager: { Service: secretsmanager }
     SsmMessages: { Service: ssmmessages }
 
-Metadata:
-  AWS::CloudFormation::Interface:
-    ParameterGroups:
-      - Label: { default: Naming }
-        Parameters: [ProjectName]
-      - Label: { default: Addressing }
-        Parameters: [VpcCidr, PublicTierCidr, AppTierCidr, DataTierCidr]
-      - Label: { default: Service ranges }
-        Parameters: [S3PrefixListId]
-
 Parameters:
   ProjectName:
     Type: String

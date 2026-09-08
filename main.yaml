@@ -8,8 +8,8 @@ Description: photo-uploader main stack - composes the eight templates in templat
 #   s3-cloudfront.yaml  private media bucket behind a distribution
 #   rds.yaml            PostgreSQL and its generated credentials
 #   iam.yaml            every role the running system assumes
-#   alb.yaml            load balancer, target group pair, listeners
-#   ecs.yaml            cluster and service, auto scaling, CodeDeploy
+#   ecs.yaml            load balancer and listeners, cluster and service,
+#                       auto scaling, CodeDeploy
 #   codepipeline.yaml   EventBridge rule, pipeline, artifact bucket
 #   cloudwatch.yaml     alarms that notify, not ones that block
 #
@@ -67,18 +67,26 @@ Parameters:
   VpcCidr:
     Type: String
     Default: 10.20.0.0/20
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+    ConstraintDescription: An IPv4 CIDR block, for example 10.20.0.0/20.
 
   PublicTierCidr:
     Type: String
     Default: 10.20.0.0/22
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+    ConstraintDescription: An IPv4 CIDR block, for example 10.20.0.0/20.
 
   AppTierCidr:
     Type: String
     Default: 10.20.4.0/22
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+    ConstraintDescription: An IPv4 CIDR block, for example 10.20.0.0/20.
 
   DataTierCidr:
     Type: String
     Default: 10.20.8.0/22
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+    ConstraintDescription: An IPv4 CIDR block, for example 10.20.0.0/20.
 
   S3PrefixListId:
     Type: AWS::SSM::Parameter::Value<String>
@@ -201,18 +209,6 @@ Resources:
         DbSecretArn: !GetAtt RdsStack.Outputs.DbSecretArn
         ConnectionArn: !Ref ConnectionArn
 
-  AlbStack:
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: !Sub 'https://${TemplateBucket}.s3.${AWS::Region}.amazonaws.com/${TemplateVersion}/alb.yaml'
-      TimeoutInMinutes: 20
-      Parameters:
-        ProjectName: !Ref ProjectName
-        VpcId: !GetAtt VpcStack.Outputs.VpcId
-        PublicSubnetIds: !GetAtt VpcStack.Outputs.PublicSubnets
-        AlbSecurityGroupId: !GetAtt VpcStack.Outputs.AlbSecurityGroupId
-        ContainerPort: !Ref ContainerPort
-
   EcsStack:
     Type: AWS::CloudFormation::Stack
     Properties:
@@ -229,12 +225,9 @@ Resources:
         TaskExecutionRoleArn: !GetAtt IamStack.Outputs.TaskExecutionRoleArn
         TaskRoleArn: !GetAtt IamStack.Outputs.TaskRoleArn
         CodeDeployRoleArn: !GetAtt IamStack.Outputs.CodeDeployRoleArn
-        LoadBalancerFullName: !GetAtt AlbStack.Outputs.LoadBalancerFullName
-        TargetGroupBlueArn: !GetAtt AlbStack.Outputs.TargetGroupBlueArn
-        TargetGroupBlueName: !GetAtt AlbStack.Outputs.TargetGroupBlueName
-        TargetGroupGreenName: !GetAtt AlbStack.Outputs.TargetGroupGreenName
-        ProdListenerArn: !GetAtt AlbStack.Outputs.ProdListenerArn
-        TestListenerArn: !GetAtt AlbStack.Outputs.TestListenerArn
+        VpcId: !GetAtt VpcStack.Outputs.VpcId
+        PublicSubnetIds: !GetAtt VpcStack.Outputs.PublicSubnets
+        AlbSecurityGroupId: !GetAtt VpcStack.Outputs.AlbSecurityGroupId
         ImageUri: !Ref ImageUri
         ContainerPort: !Ref ContainerPort
         TaskCpu: !Ref TaskCpu
@@ -271,8 +264,8 @@ Resources:
         ProjectName: !Ref ProjectName
         AlertTopicArn: {'Fn::ImportValue': !Sub '${ProjectName}-AlertTopicArn'}
         DbInstanceIdentifier: !GetAtt RdsStack.Outputs.DbInstanceIdentifier
-        LoadBalancerFullName: !GetAtt AlbStack.Outputs.LoadBalancerFullName
-        TargetGroupBlueFullName: !GetAtt AlbStack.Outputs.TargetGroupBlueFullName
+        LoadBalancerFullName: !GetAtt EcsStack.Outputs.LoadBalancerFullName
+        TargetGroupBlueFullName: !GetAtt EcsStack.Outputs.TargetGroupBlueFullName
         ClusterName: !GetAtt EcsStack.Outputs.ClusterName
         ServiceName: !GetAtt EcsStack.Outputs.ServiceName
         MaxCapacity: !Ref MaxCapacity
@@ -282,7 +275,7 @@ Outputs:
     Description: Public application endpoint
     Value: !Sub
       - 'http://${Dns}'
-      - Dns: !GetAtt AlbStack.Outputs.DnsName
+      - Dns: !GetAtt EcsStack.Outputs.DnsName
 
   CloudFrontDomain:
     Value: !GetAtt S3CloudFrontStack.Outputs.CloudFrontDomain

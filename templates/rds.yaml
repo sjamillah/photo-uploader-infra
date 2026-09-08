@@ -1,16 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: photo-uploader database - PostgreSQL and its generated credentials
 
-Metadata:
-  AWS::CloudFormation::Interface:
-    ParameterGroups:
-      - Label: { default: Naming }
-        Parameters: [ProjectName]
-      - Label: { default: From the VPC template }
-        Parameters: [DataSubnetIds, RdsSecurityGroupId]
-      - Label: { default: Database }
-        Parameters: [DbName, DbInstanceClass, DbEngineVersion, DbMultiAZ]
-
 Parameters:
   ProjectName: { Type: String }
 
@@ -100,9 +90,6 @@ Resources:
 Outputs:
   DbSecretArn:
     Value: !Ref DbSecret
-
-  DbEndpoint:
-    Value: !GetAtt Database.Endpoint.Address
 
   DbInstanceIdentifier:
     Description: Dimension value for the alarms in cloudwatch.yaml
