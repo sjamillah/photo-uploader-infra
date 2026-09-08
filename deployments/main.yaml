@@ -6,7 +6,7 @@ parameters:
   ProjectName: photo-app
 
   # Managed by the upload job in .github/workflows/ci.yml.
-  TemplateVersion: a736bed5375a1156b07bfb93950a5c95f5b47c2c
+  TemplateVersion: 7c121a53d76b0cb085bb3783967b3f5e9773f180
 
   GitHubOrg: sjamillah
 
