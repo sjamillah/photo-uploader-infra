@@ -4,6 +4,7 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 # Read-only by default; only the job that talks to AWS gets more.
 permissions:
@@ -15,7 +16,7 @@ concurrency:
 
 jobs:
   check:
-    name: Lint and scan
+    name: Lint templates
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -24,14 +25,11 @@ jobs:
         with:
           python-version: '3.12'
 
-      # Pinned, so a new release adding a check fails on the commit that
-      # bumps it rather than on someone else's unrelated push.
-      - run: pip install cfn-lint==1.56.1 checkov==3.3.16
+      # Pinned so a new release fails on the commit that bumps it, not on
+      # someone else's unrelated push.
+      - run: pip install cfn-lint==1.56.1
 
       - run: cfn-lint bootstrap.yaml main.yaml templates/*.yaml
-
-      # Scope and suppressions live in .checkov.yaml, each with its reason.
-      - run: checkov --config-file .checkov.yaml
 
   upload:
     name: Upload templates

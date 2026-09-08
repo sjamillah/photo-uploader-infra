@@ -8,11 +8,19 @@ set -euo pipefail
 
 BUCKET="${1:?usage: upload-templates.sh <bucket> <sha>}"
 SHA="${2:?missing commit sha}"
-DEPLOYMENT_FILE="${DEPLOYMENT_FILE:-deployments/main-dev.yaml}"
+DEPLOYMENT_FILE="${DEPLOYMENT_FILE:-deployments/main.yaml}"
+
+PLACEHOLDER=0000000000000000000000000000000000000000
+pinned="$(sed -nE 's|^  TemplateVersion: ||p' "$DEPLOYMENT_FILE")"
 
 # Nothing to do if this push did not move a template. Without this, a README
-# commit would re-upload and bump the version for no reason.
-if git rev-parse HEAD~1 >/dev/null 2>&1 && git diff --quiet HEAD~1 HEAD -- templates/; then
+# commit would re-upload and bump the version for no reason. The placeholder
+# check matters on a fresh repository: the commit that adds templates/ can fail
+# earlier in the run, and then the first commit that does reach this step has no
+# template change of its own while the bucket is still empty.
+if [ "$pinned" != "$PLACEHOLDER" ] &&
+   git rev-parse HEAD~1 >/dev/null 2>&1 &&
+   git diff --quiet HEAD~1 HEAD -- templates/; then
   echo "no template changes in $SHA"
   exit 0
 fi

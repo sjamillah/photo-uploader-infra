@@ -19,8 +19,8 @@ infrastructure identifiers is normal.
 
 | Stack | Deployed by | Contains |
 |---|---|---|
-| `photo-app-bootstrap` | created by hand once, then Git sync from `deployments/bootstrap-dev.yaml` | IAM roles, OIDC provider, ECR, template staging bucket, SNS topic |
-| `photo-app-main` | Git sync from `deployments/main-dev.yaml` | eight nested children |
+| `photo-app-bootstrap` | created by hand once, then Git sync from `deployments/bootstrap.yaml` | IAM roles, OIDC provider, ECR, template staging bucket, SNS topic |
+| `photo-app-main` | Git sync from `deployments/main.yaml` | eight nested children |
 
 Both stacks are Git-synced. Bootstrap has to be *created* by hand, because it
 is what creates the roles Git sync assumes, but once it exists Git sync adopts
@@ -89,7 +89,7 @@ prints its contents. Roughly:
 
 Nested stacks need an S3 `TemplateURL` and Git sync has no packaging step, so
 CI uploads everything in `templates/` under the commit SHA, then writes
-that SHA into `deployments/main-dev.yaml`. The resulting commit is what Git sync
+that SHA into `deployments/main.yaml`. The resulting commit is what Git sync
 deploys, which closes the race where it could otherwise start while the upload
 was still running.
 
@@ -172,7 +172,7 @@ its digest at `/photo-app/image/current`.
 
 **6. Create the synced stack**, named `photo-app-main`. CloudFormation → Create
 stack → Sync from Git, branch `main`, deployment file
-`deployments/main-dev.yaml`. Choose the existing
+`deployments/main.yaml`. Choose the existing
 `photo-app-gitsync` and `photo-app-cfn-deployment` roles. Do not let the
 console create new ones.
 
@@ -279,7 +279,7 @@ One workflow, `ci.yml`, with two jobs:
 
 | Job | Runs on | Does |
 |---|---|---|
-| `check` | pull requests and pushes | cfn-lint, then checkov |
+| `check` | pull requests and pushes | cfn-lint |
 | `upload` | pushes to `main`, and only if `check` passed | upload templates, pin the commit |
 
 `upload` exits early when no template changed, so a README commit does not

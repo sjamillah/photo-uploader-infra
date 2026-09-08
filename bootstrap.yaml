@@ -4,7 +4,7 @@ Description: photo-uploader bootstrap - IAM, OIDC, ECR, template staging, alerti
 # Created once by hand, then adopted by Git sync like every other stack.
 #
 # The first creation cannot be Git-synced, because this stack is what creates
-# the roles Git sync assumes. After that, deployments/bootstrap-dev.yaml drives
+# the roles Git sync assumes. After that, deployments/bootstrap.yaml drives
 # it from the repository.
 #
 #   aws cloudformation deploy --stack-name photo-app-bootstrap \
