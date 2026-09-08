@@ -3,15 +3,15 @@
 # at them. That second commit is what Git sync deploys, which is how the root
 # stack never sees a half-uploaded set.
 #
-#   scripts/stage-templates.sh <bucket> <sha>
+#   scripts/upload-templates.sh <bucket> <sha>
 set -euo pipefail
 
-BUCKET="${1:?usage: stage-templates.sh <bucket> <sha>}"
+BUCKET="${1:?usage: upload-templates.sh <bucket> <sha>}"
 SHA="${2:?missing commit sha}"
 DEPLOYMENT_FILE="${DEPLOYMENT_FILE:-deployments/main-dev.yaml}"
 
 # Nothing to do if this push did not move a template. Without this, a README
-# commit would restage and bump the version for no reason.
+# commit would re-upload and bump the version for no reason.
 if git rev-parse HEAD~1 >/dev/null 2>&1 && git diff --quiet HEAD~1 HEAD -- templates/; then
   echo "no template changes in $SHA"
   exit 0

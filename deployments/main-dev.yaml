@@ -5,7 +5,7 @@ template-file-path: main.yaml
 parameters:
   ProjectName: photo-app
 
-  # Managed by the stage job in .github/workflows/ci.yml.
+  # Managed by the upload job in .github/workflows/ci.yml.
   TemplateVersion: 0000000000000000000000000000000000000000
 
   GitHubOrg: sjamillah

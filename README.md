@@ -50,7 +50,7 @@ its own.
 | `templates/ecs.yaml` | ECS cluster and service, auto scaling, CodeDeploy |
 | `templates/codepipeline.yaml` | EventBridge rule, CodePipeline, artifact bucket |
 | `templates/cloudwatch.yaml` | Alarms that notify, not ones that block |
-| `scripts/stage-templates.sh` | What CI runs to stage and pin |
+| `scripts/upload-templates.sh` | What CI runs to upload and pin |
 
 Deploy order is `vpc -> s3-cloudfront -> rds -> iam -> alb -> ecs ->
 codepipeline -> cloudwatch`, which CloudFormation works out from the `!GetAtt` references
@@ -214,7 +214,7 @@ so application code can never read a secret it was not injected with.
 
 ## One repository setting
 
-The `stage` job commits the pinned version back, so `GITHUB_TOKEN` needs write
+The `upload` job commits the pinned version back, so `GITHUB_TOKEN` needs write
 access: **Settings, Actions, General, Workflow permissions, "Read and write
 permissions"**.
 
@@ -279,12 +279,12 @@ One workflow, `ci.yml`, with two jobs:
 
 | Job | Runs on | Does |
 |---|---|---|
-| `validate` | pull requests and pushes | cfn-lint, then checkov |
-| `stage` | pushes to `main`, and only if `validate` passed | upload templates, pin the commit |
+| `check` | pull requests and pushes | cfn-lint, then checkov |
+| `upload` | pushes to `main`, and only if `check` passed | upload templates, pin the commit |
 
-`stage` exits early when no template changed, so a README commit does not
-restage anything, and its own commit carries `[skip ci]` so it cannot trigger
-the workflow again. Only `stage` is granted `id-token: write`.
+`upload` exits early when no template changed, so a README commit does not
+re-upload anything, and its own commit carries `[skip ci]` so it cannot trigger
+the workflow again. Only `upload` is granted `id-token: write`.
 
 ## Two loops
 

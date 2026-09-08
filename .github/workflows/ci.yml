@@ -14,8 +14,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  validate:
-    name: Validate templates
+  check:
+    name: Lint and scan
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -24,21 +24,18 @@ jobs:
         with:
           python-version: '3.12'
 
-      - run: pip install cfn-lint checkov
+      # Pinned, so a new release adding a check fails on the commit that
+      # bumps it rather than on someone else's unrelated push.
+      - run: pip install cfn-lint==1.56.1 checkov==3.3.16
 
       - run: cfn-lint bootstrap.yaml main.yaml templates/*.yaml
 
-      - name: Security scan
-        # CKV_AWS_18 is S3 access logging, left off deliberately (see README).
-        # CKV_AWS_21 wants versioning on the artifact bucket, whose contents
-        # expire after 30 days by design.
-        run: |
-          checkov --directory . --framework cloudformation --compact --quiet \
-            --skip-check CKV_AWS_18,CKV_AWS_21
+      # Scope and suppressions live in .checkov.yaml, each with its reason.
+      - run: checkov --config-file .checkov.yaml
 
-  stage:
-    name: Stage templates
-    needs: validate
+  upload:
+    name: Upload templates
+    needs: check
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
@@ -59,6 +56,6 @@ jobs:
 
       - name: Upload and point the deployment file
         run: |
-          bash scripts/stage-templates.sh \
+          bash scripts/upload-templates.sh \
             "${{ secrets.TEMPLATE_BUCKET }}" \
             "${{ github.sha }}"
