@@ -169,9 +169,11 @@ aws ssm put-parameter --name /photo-app/s3-prefix-list-id --type String \
     --query 'PrefixLists[0].PrefixListId' --output text)"
 ```
 
-`/photo-app/image/current` is written by the application pipeline and stays
-that way. Creating it here would mean every bootstrap update reset it to a
-placeholder, rolling ECS back to an image that does not exist.
+`/photo-app/image/current` is written by the application pipeline as a record
+of what was last published. No template reads it: `main.yaml` builds the task
+definition's image from the repository name and the `latest` tag instead, so
+that the value never changes between stack updates. The next section says why
+that matters.
 
 **5. Push the application.** CI tests and pushes an image, then records
 its digest at `/photo-app/image/current`.
@@ -336,6 +338,31 @@ goes quietly stale every time a template moves.
 | Auto scaling 1 to 4 | `main.yaml`, `ecs.yaml` | Scaling policy, and desired count moving under load |
 | Blue/green works | `ecs.yaml`, `codepipeline.yaml` | CodeDeploy at 100% on green, and a poll of production showing no failed request |
 | Security and cost practices | throughout | The Decisions and Known gaps sections above |
+
+## The task definition can only be changed by CodeDeploy
+
+The ECS service uses the `CODE_DEPLOY` deployment controller, and ECS refuses
+any attempt by CloudFormation to move such a service onto a different task
+definition:
+
+```
+Unable to update task definition on services with a CODE_DEPLOY deployment
+controller. Use AWS CodeDeploy to trigger a new deployment.
+```
+
+So anything that makes `ecs.yaml`'s `TaskDefinition` resource change during a
+stack update will fail the update and roll the whole stack back. That includes
+`TaskCpu`, `TaskMemory`, `ContainerPort` and the container image.
+
+The image is handled: `ImageUri` is built from the repository name and the
+`latest` tag, so its string is identical on every update and the task
+definition stays put. CodeDeploy pins a digest from `imageDetail.json` from the
+first deployment onward.
+
+The sizing parameters are not. To change cpu or memory, change them in
+`ecs.yaml`, let the stack fail, then deploy through the pipeline; or delete and
+recreate the service. This is a property of blue/green on ECS, not of these
+templates.
 
 ## Known gaps
 

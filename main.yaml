@@ -35,7 +35,6 @@ Metadata:
         Parameters: [DbName, DbInstanceClass, DbEngineVersion, DbMultiAZ]
       - Label: { default: Application }
         Parameters:
-          - ImageUri
           - TriggerImageTag
           - ContainerPort
           - TaskCpu
@@ -108,13 +107,6 @@ Parameters:
     Type: String
     Default: 'true'
     AllowedValues: ['true', 'false']
-
-  ImageUri:
-    Type: AWS::SSM::Parameter::Value<String>
-    Default: /photo-app/image/current
-    Description: >-
-      The value supplied is the parameter NAME. CloudFormation resolves it to
-      the digest-pinned image URI the build workflow recorded.
 
   TriggerImageTag:
     Type: String
@@ -228,7 +220,16 @@ Resources:
         VpcId: !GetAtt VpcStack.Outputs.VpcId
         PublicSubnetIds: !GetAtt VpcStack.Outputs.PublicSubnets
         AlbSecurityGroupId: !GetAtt VpcStack.Outputs.AlbSecurityGroupId
-        ImageUri: !Ref ImageUri
+        # A tag, not the digest in Parameter Store. This value has to stay
+        # identical across stack updates: the service uses the CODE_DEPLOY
+        # controller, and ECS rejects any attempt by CloudFormation to move a
+        # service like that onto a new task definition. CodeDeploy owns the
+        # image from the first deployment onward, pinning a digest out of
+        # imageDetail.json, so this URI is only ever read once.
+        ImageUri: !Sub
+          - '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${Repo}:${Tag}'
+          - Repo: {'Fn::ImportValue': !Sub '${ProjectName}-EcrRepositoryName'}
+            Tag: !Ref TriggerImageTag
         ContainerPort: !Ref ContainerPort
         TaskCpu: !Ref TaskCpu
         TaskMemory: !Ref TaskMemory
