@@ -1,18 +1,13 @@
 template-file-path: bootstrap.yaml
-
-# Git sync adopts the existing stack rather than creating a second one, so
-# these must match what the first deploy used.
 parameters:
   ProjectName: photo-app
   GitHubOrg: sjamillah
-  GitHubInfraRepo: photo-uploader-infra
   GitHubBranch: main
-  # false when the account already has the provider. It is account-global.
+  GitHubInfraRepo: photo-uploader-infra
   CreateOidcProvider: 'false'
-
 tags:
   Project: photo-uploader
-  Environment: dev
   Owner: jamillah.ssozi
   ManagedBy: cloudformation-gitsync
+  Environment: dev
   CostCentre: training
