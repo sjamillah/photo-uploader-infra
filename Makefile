@@ -19,7 +19,7 @@ package:
 lint:
 	cfn-lint *.yaml templates/*.yaml
 
-# What CI runs: package again and prove nothing moved.
-check: lint package
+# Package again and prove nothing moved. Linting is a separate CI job.
+check: package
 	@git diff --exit-code -- main.packaged.yaml \
 	  || (echo "main.packaged.yaml is stale. Run 'make package' and commit it."; exit 1)

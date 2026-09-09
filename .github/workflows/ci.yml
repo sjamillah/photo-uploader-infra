@@ -29,9 +29,8 @@ jobs:
       # someone else's unrelated push.
       - run: pip install cfn-lint==1.56.1
 
-      # Every template at the root plus every child. A glob rather than a list,
-      # so a new root stack is linted without anyone remembering to add it.
-      - run: cfn-lint *.yaml templates/*.yaml
+      # The glob lives in the Makefile so it is not written down twice.
+      - run: make lint
 
   package:
     name: Package
