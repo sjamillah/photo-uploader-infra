@@ -108,6 +108,14 @@ Parameters:
     Default: 'true'
     AllowedValues: ['true', 'false']
 
+  # Deliberately a different parameter from /photo-app/image/current, which the
+  # pipeline rewrites on every push. This one is written once and left alone,
+  # because the value has to be identical on every stack update: ECS will not
+  # let CloudFormation move a CODE_DEPLOY service onto another task definition.
+  ImageDigest:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /photo-app/image/service
+
   TriggerImageTag:
     Type: String
     Default: latest
@@ -220,16 +228,16 @@ Resources:
         VpcId: !GetAtt VpcStack.Outputs.VpcId
         PublicSubnetIds: !GetAtt VpcStack.Outputs.PublicSubnets
         AlbSecurityGroupId: !GetAtt VpcStack.Outputs.AlbSecurityGroupId
-        # A tag, not the digest in Parameter Store. This value has to stay
-        # identical across stack updates: the service uses the CODE_DEPLOY
-        # controller, and ECS rejects any attempt by CloudFormation to move a
-        # service like that onto a new task definition. CodeDeploy owns the
-        # image from the first deployment onward, pinning a digest out of
-        # imageDetail.json, so this URI is only ever read once.
+        # Built from a digest pinned in the deployment file, not read from
+        # Parameter Store. The service uses the CODE_DEPLOY controller and ECS
+        # rejects any attempt by CloudFormation to move such a service onto a
+        # different task definition, so this value has to be identical on every
+        # update or the stack rolls back. CodeDeploy owns the image from the
+        # first deployment onward; this one only ever creates the service.
         ImageUri: !Sub
-          - '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${Repo}:${Tag}'
+          - '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${Repo}@${Digest}'
           - Repo: {'Fn::ImportValue': !Sub '${ProjectName}-EcrRepositoryName'}
-            Tag: !Ref TriggerImageTag
+            Digest: !Ref ImageDigest
         ContainerPort: !Ref ContainerPort
         TaskCpu: !Ref TaskCpu
         TaskMemory: !Ref TaskMemory
