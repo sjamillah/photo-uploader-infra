@@ -492,6 +492,12 @@ Resources:
         MaxCapacity:
           Ref: MaxCapacity
 Outputs:
+  GitHubAppRoleArn:
+    Description: Role GitHub Actions in the app repository assumes
+    Value:
+      Fn::GetAtt:
+      - IamStack
+      - Outputs.GitHubAppRoleArn
   ApplicationUrl:
     Condition: DeployApplication
     Description: Public application endpoint
