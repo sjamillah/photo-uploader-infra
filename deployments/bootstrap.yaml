@@ -1,23 +1,15 @@
 template-file-path: bootstrap.yaml
-
-# Git sync adopts the existing photo-app-bootstrap stack, it does not create a
-# second one. These must match what the first console or CLI deploy used, or
-# the first sync deploys the difference. Changing ProjectName here would rename
-# every role in the account.
 parameters:
+  AlertEmail: j.ssozi@alustudent.com
   ProjectName: photo-app
   GitHubOrg: sjamillah
-  GitHubInfraRepo: photo-uploader-infra
   GitHubAppRepo: photo-uploader-app
   GitHubBranch: main
-  # false when the account already has the GitHub provider, which is the
-  # common case. It is account-global, not per project.
+  GitHubInfraRepo: photo-uploader-infra
   CreateOidcProvider: 'false'
-  AlertEmail: 'j.ssozi@alustudent.com'
-
 tags:
   Project: photo-uploader
-  Environment: dev
   Owner: jamillah.ssozi
   ManagedBy: cloudformation-gitsync
+  Environment: dev
   CostCentre: training
