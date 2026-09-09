@@ -10,18 +10,14 @@ BUCKET="${1:?usage: upload-templates.sh <bucket> <sha>}"
 SHA="${2:?missing commit sha}"
 DEPLOYMENT_FILE="${DEPLOYMENT_FILE:-deployments/main.yaml}"
 
-PLACEHOLDER=0000000000000000000000000000000000000000
 pinned="$(sed -nE 's|^  TemplateVersion: ||p' "$DEPLOYMENT_FILE")"
 
-# Nothing to do if this push did not move a template. Without this, a README
-# commit would re-upload and bump the version for no reason. The placeholder
-# check matters on a fresh repository: the commit that adds templates/ can fail
-# earlier in the run, and then the first commit that does reach this step has no
-# template change of its own while the bucket is still empty.
-if [ "$pinned" != "$PLACEHOLDER" ] &&
-   git rev-parse HEAD~1 >/dev/null 2>&1 &&
+# Upload unless the templates are already sitting where main.yaml will look for
+# them and nothing has changed since. Asking S3 rather than tracking it in the
+# repository means an emptied or recreated bucket fixes itself on the next run.
+if aws s3 ls "s3://$BUCKET/$pinned/vpc.yaml" >/dev/null 2>&1 &&
    git diff --quiet HEAD~1 HEAD -- templates/; then
-  echo "no template changes in $SHA"
+  echo "already staged at $pinned"
   exit 0
 fi
 

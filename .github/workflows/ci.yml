@@ -34,7 +34,9 @@ jobs:
   upload:
     name: Upload templates
     needs: check
-    if: github.event_name == 'push'
+    # Pull requests stop after the lint. Run workflow re-uploads on demand,
+    # which is how you recover when the bucket is emptied or recreated.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       id-token: write
