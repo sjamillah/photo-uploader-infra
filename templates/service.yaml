@@ -4,9 +4,8 @@ Description: >-
   photo-uploader application tier - load balancer, target group pair,
   listeners, ECS cluster, task, service, auto scaling, CodeDeploy
 
-# The two alarms at the bottom are here, not in cloudwatch.yaml, because the
-# deployment group blocks on them and they have to exist first. Everything
-# that only notifies a human is in cloudwatch.yaml.
+# The two alarms at the bottom live here because the deployment group blocks
+# on them. Anything that only notifies a human is in monitoring.yaml.
 
 Parameters:
   ProjectName: { Type: String }
@@ -94,10 +93,8 @@ Resources:
 
   # --- Target groups --------------------------------------------------------
 
-  # Identical by design: CodeDeploy moves traffic between them, so any
-  # difference would change behaviour depending on which one is live. Green
-  # holds the replacement task set until the listener is swapped onto it,
-  # which is the cutover.
+  # Identical by design: CodeDeploy swaps traffic between them, so any
+  # difference would change behaviour depending on which is live.
   Fn::ForEach::TargetGroups:
     - Colour
     - [Blue, Green]
@@ -282,108 +279,6 @@ Resources:
         ScaleInCooldown: 300
         DisableScaleIn: false
 
-  # --- Blue/green deployment ------------------------------------------------
-
-  CodeDeployApplication:
-    Type: AWS::CodeDeploy::Application
-    Properties:
-      ApplicationName: !Sub '${ProjectName}-app'
-      ComputePlatform: ECS
-
-  DeploymentGroup:
-    Type: AWS::CodeDeploy::DeploymentGroup
-    Properties:
-      ApplicationName: !Ref CodeDeployApplication
-      DeploymentGroupName: !Sub '${ProjectName}-dg'
-      ServiceRoleArn: !Ref CodeDeployRoleArn
-      # Swap for CodeDeployDefault.ECSCanary10Percent5Minutes to shift
-      # traffic gradually instead.
-      DeploymentConfigName: CodeDeployDefault.ECSAllAtOnce
-      DeploymentStyle:
-        DeploymentType: BLUE_GREEN
-        DeploymentOption: WITH_TRAFFIC_CONTROL
-      BlueGreenDeploymentConfiguration:
-        DeploymentReadyOption:
-          ActionOnTimeout: CONTINUE_DEPLOYMENT
-        TerminateBlueInstancesOnDeploymentSuccess:
-          Action: TERMINATE
-          # Old tasks stay alive briefly after cutover so a rollback needs no
-          # cold start.
-          TerminationWaitTimeInMinutes: 5
-      AutoRollbackConfiguration:
-        Enabled: true
-        Events:
-          - DEPLOYMENT_FAILURE
-          - DEPLOYMENT_STOP_ON_ALARM
-      # Without alarms attached, DEPLOYMENT_STOP_ON_ALARM above can never fire.
-      AlarmConfiguration:
-        Enabled: true
-        # If CloudWatch cannot be polled, fail the deployment. Do not deploy blind.
-        IgnorePollAlarmFailure: false
-        Alarms:
-          - Name: !Ref Target5xxAlarm
-          - Name: !Ref HighLatencyAlarm
-      ECSServices:
-        - ClusterName: !Ref Cluster
-          ServiceName: !GetAtt Service.Name
-      LoadBalancerInfo:
-        TargetGroupPairInfoList:
-          - TargetGroups:
-              - Name: !GetAtt TargetGroupBlue.TargetGroupName
-              - Name: !GetAtt TargetGroupGreen.TargetGroupName
-            # Two target groups are what blue/green swaps between, so both
-            # are required. TestTrafficRoute is not: it exists to serve
-            # validation traffic, and nothing here sends any.
-            ProdTrafficRoute:
-              ListenerArns:
-                - !Ref Listener
-
-  # --- Alarms that gate the cutover -----------------------------------------
-
-  # Keep these fast: an alarm needing fifteen minutes cannot gate a
-  # five-minute deployment.
-  Target5xxAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Sub '${ProjectName}-target-5xx'
-      AlarmDescription: Application returned 5xx responses
-      Namespace: AWS/ApplicationELB
-      MetricName: HTTPCode_Target_5XX_Count
-      Dimensions:
-        - Name: LoadBalancer
-          Value: !GetAtt LoadBalancer.LoadBalancerFullName
-      Statistic: Sum
-      Period: 60
-      EvaluationPeriods: 2
-      Threshold: 5
-      ComparisonOperator: GreaterThanOrEqualToThreshold
-      # No traffic must not read as failure, or a quiet night pages someone.
-      TreatMissingData: notBreaching
-      AlarmActions:
-        - !Ref AlertTopicArn
-      OKActions:
-        - !Ref AlertTopicArn
-
-  HighLatencyAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Sub '${ProjectName}-high-latency'
-      AlarmDescription: p95 response time above two seconds
-      Namespace: AWS/ApplicationELB
-      MetricName: TargetResponseTime
-      Dimensions:
-        - Name: LoadBalancer
-          Value: !GetAtt LoadBalancer.LoadBalancerFullName
-      # p95, not Average, which hides the tail.
-      ExtendedStatistic: p95
-      Period: 60
-      EvaluationPeriods: 3
-      Threshold: 2
-      ComparisonOperator: GreaterThanThreshold
-      TreatMissingData: notBreaching
-      AlarmActions:
-        - !Ref AlertTopicArn
-
 Outputs:
   ClusterName:
     Value: !Ref Cluster
@@ -391,11 +286,14 @@ Outputs:
   ServiceName:
     Value: !GetAtt Service.Name
 
-  CodeDeployApplicationName:
-    Value: !Ref CodeDeployApplication
+  ListenerArn:
+    Value: !Ref Listener
 
-  CodeDeployDeploymentGroupName:
-    Value: !Ref DeploymentGroup
+  TargetGroupBlueName:
+    Value: !GetAtt TargetGroupBlue.TargetGroupName
+
+  TargetGroupGreenName:
+    Value: !GetAtt TargetGroupGreen.TargetGroupName
 
   DnsName:
     Value: !GetAtt LoadBalancer.DNSName

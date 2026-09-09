@@ -1,0 +1,126 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: photo-uploader blue/green - the CodeDeploy application and what gates a cutover
+
+# Separate from service.yaml: CodeDeploy owns the relationship between the
+# service and the two target groups, and the gating alarms belong with it.
+
+Parameters:
+  ProjectName: { Type: String }
+  AlertTopicArn: { Type: String }
+  CodeDeployRoleArn: { Type: String }
+
+  # From service.yaml. CodeDeploy addresses all of these by name, not by ARN.
+  ClusterName: { Type: String }
+  ServiceName: { Type: String }
+  TargetGroupBlueName: { Type: String }
+  TargetGroupGreenName: { Type: String }
+  ListenerArn: { Type: String }
+  LoadBalancerFullName: { Type: String }
+
+Resources:
+
+  CodeDeployApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ApplicationName: !Sub '${ProjectName}-app'
+      ComputePlatform: ECS
+
+  DeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: !Sub '${ProjectName}-dg'
+      ServiceRoleArn: !Ref CodeDeployRoleArn
+      # Swap for CodeDeployDefault.ECSCanary10Percent5Minutes to shift
+      # traffic gradually instead.
+      DeploymentConfigName: CodeDeployDefault.ECSAllAtOnce
+      DeploymentStyle:
+        DeploymentType: BLUE_GREEN
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+      BlueGreenDeploymentConfiguration:
+        DeploymentReadyOption:
+          ActionOnTimeout: CONTINUE_DEPLOYMENT
+        TerminateBlueInstancesOnDeploymentSuccess:
+          Action: TERMINATE
+          # Old tasks stay alive briefly after cutover so a rollback needs no
+          # cold start.
+          TerminationWaitTimeInMinutes: 5
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events:
+          - DEPLOYMENT_FAILURE
+          - DEPLOYMENT_STOP_ON_ALARM
+      # Without alarms attached, DEPLOYMENT_STOP_ON_ALARM above can never fire.
+      AlarmConfiguration:
+        Enabled: true
+        # If CloudWatch cannot be polled, fail the deployment. Do not deploy blind.
+        IgnorePollAlarmFailure: false
+        Alarms:
+          - Name: !Ref Target5xxAlarm
+          - Name: !Ref HighLatencyAlarm
+      ECSServices:
+        - ClusterName: !Ref ClusterName
+          ServiceName: !Ref ServiceName
+      LoadBalancerInfo:
+        TargetGroupPairInfoList:
+          - TargetGroups:
+              - Name: !Ref TargetGroupBlueName
+              - Name: !Ref TargetGroupGreenName
+            # Both target groups are required. TestTrafficRoute is not, and
+            # nothing here sends validation traffic.
+            ProdTrafficRoute:
+              ListenerArns:
+                - !Ref ListenerArn
+
+  # --- Alarms that gate the cutover -----------------------------------------
+
+  # Keep these fast: an alarm needing fifteen minutes cannot gate a
+  # five-minute deployment.
+  Target5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-target-5xx'
+      AlarmDescription: Application returned 5xx responses
+      Namespace: AWS/ApplicationELB
+      MetricName: HTTPCode_Target_5XX_Count
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !Ref LoadBalancerFullName
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      # No traffic must not read as failure, or a quiet night pages someone.
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopicArn
+      OKActions:
+        - !Ref AlertTopicArn
+
+  HighLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-high-latency'
+      AlarmDescription: p95 response time above two seconds
+      Namespace: AWS/ApplicationELB
+      MetricName: TargetResponseTime
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !Ref LoadBalancerFullName
+      # p95, not Average, which hides the tail.
+      ExtendedStatistic: p95
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 2
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopicArn
+
+Outputs:
+  ApplicationName:
+    Value: !Ref CodeDeployApplication
+
+  DeploymentGroupName:
+    Value: !Ref DeploymentGroup

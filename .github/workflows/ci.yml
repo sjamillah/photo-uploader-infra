@@ -29,24 +29,22 @@ jobs:
       # someone else's unrelated push.
       - run: pip install cfn-lint==1.56.1
 
-      - run: cfn-lint bootstrap.yaml main.yaml templates/*.yaml
+      # Every template at the root plus every child. A glob rather than a list,
+      # so a new root stack is linted without anyone remembering to add it.
+      - run: cfn-lint *.yaml templates/*.yaml
 
-  upload:
-    name: Upload templates
+  package:
+    name: Package
     needs: check
-    # Pull requests stop after the lint. Run workflow re-uploads on demand,
-    # which is how you recover when the bucket is emptied or recreated.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    # Read only. Nothing is generated here and nothing is written back:
+    # main.packaged.yaml is committed by whoever changed the templates.
     permissions:
       id-token: write
-      contents: write
+      contents: read
     steps:
       - uses: actions/checkout@v7
-        with:
-          # The script compares against the previous commit to decide whether
-          # any template actually moved.
-          fetch-depth: 2
 
       - uses: aws-actions/configure-aws-credentials@v6
         with:
@@ -54,8 +52,8 @@ jobs:
           role-session-name: ci-${{ github.run_id }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Upload and point the deployment file
-        run: |
-          bash scripts/upload-templates.sh \
-            "${{ secrets.TEMPLATE_BUCKET }}" \
-            "${{ github.sha }}"
+      # Uploads the children and rewrites the paths in main.yaml, then proves
+      # the committed main.packaged.yaml already says the same thing. Package
+      # keys objects by content, so an unchanged template uploads nothing.
+      - name: Package and prove it is in step
+        run: make check

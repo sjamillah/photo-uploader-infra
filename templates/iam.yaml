@@ -1,18 +1,20 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: photo-uploader IAM - every role the running system assumes
+Description: photo-uploader IAM - every role except the ones needed before this stack exists
 
-# All workload permissions in one file, so "what can this thing do?" has one
-# answer instead of three. The four roles that exist before any of this is
-# deployed - Git sync, CloudFormation, and the two GitHub Actions roles - are
-# in bootstrap.yaml, because they have to exist before a pipeline can run.
-#
-# Two ARNs below are built with Fn::Sub, not GetAtt, because the
-# resources they name live in codepipeline.yaml, which is deployed after this
-# one. The names are deterministic, so this is safe; changing a name in
-# codepipeline.yaml means changing it here.
+# Every role except the three bootstrap.yaml creates, which Git sync and CI
+# both need before anything is deployed.
 
 Parameters:
   ProjectName: { Type: String }
+
+  # Defined once in main.yaml and handed to both stacks, because the roles
+  # are created before the resources they grant access to.
+  ArtifactBucketName: { Type: String }
+  EcrRepositoryArn: { Type: String }
+  GitHubOrg: { Type: String }
+  GitHubAppRepo: { Type: String }
+  GitHubBranch: { Type: String }
+  PipelineName: { Type: String }
   MediaBucketArn: { Type: String }
   DbSecretArn: { Type: String }
   ConnectionArn: { Type: String }
@@ -125,8 +127,8 @@ Resources:
                   - 's3:PutObject'
                   - 's3:GetBucketLocation'
                 Resource:
-                  - !Sub 'arn:${AWS::Partition}:s3:::${ProjectName}-artifacts-${AWS::AccountId}-${AWS::Region}'
-                  - !Sub 'arn:${AWS::Partition}:s3:::${ProjectName}-artifacts-${AWS::AccountId}-${AWS::Region}/*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${ArtifactBucketName}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${ArtifactBucketName}/*'
               - Sid: UseGitHubConnection
                 Effect: Allow
                 Action: 'codeconnections:UseConnection'
@@ -183,9 +185,67 @@ Resources:
             Statement:
               - Effect: Allow
                 Action: 'codepipeline:StartPipelineExecution'
-                Resource: !Sub 'arn:${AWS::Partition}:codepipeline:${AWS::Region}:${AWS::AccountId}:${ProjectName}-pipeline'
+                Resource: !Sub 'arn:${AWS::Partition}:codepipeline:${AWS::Region}:${AWS::AccountId}:${PipelineName}'
+
+  GitHubAppRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-gha-app'
+      Description: GitHub Actions in the application repo, pushing images to ECR
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
+            Action: 'sts:AssumeRoleWithWebIdentity'
+            Condition:
+              StringEquals:
+                'token.actions.githubusercontent.com:aud': sts.amazonaws.com
+              StringLike:
+                # GitHub appends numeric ids so the claim survives a rename.
+                # Both shapes accepted; the literal @ anchors the wildcard.
+                'token.actions.githubusercontent.com:sub':
+                  - !Sub 'repo:${GitHubOrg}/${GitHubAppRepo}:ref:refs/heads/${GitHubBranch}'
+                  - !Sub 'repo:${GitHubOrg}@*/${GitHubAppRepo}@*:ref:refs/heads/${GitHubBranch}'
+      Policies:
+        - PolicyName: ecr-push
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AuthTokenIsAccountWide
+                Effect: Allow
+                Action: 'ecr:GetAuthorizationToken'
+                Resource: '*'
+              - Sid: PushToThisRepositoryOnly
+                Effect: Allow
+                Action:
+                  - 'ecr:BatchCheckLayerAvailability'
+                  - 'ecr:InitiateLayerUpload'
+                  - 'ecr:UploadLayerPart'
+                  - 'ecr:CompleteLayerUpload'
+                  - 'ecr:PutImage'
+                  - 'ecr:BatchGetImage'
+                  - 'ecr:GetDownloadUrlForLayer'
+                  # The workflow writes back the digest it just pushed, so Parameter Store
+                  # holds an immutable reference rather than a movable tag.
+                  - 'ecr:DescribeImages'
+                # The repository is templates/ecr.yaml now, so its ARN is built
+                # from the name rather than referenced.
+                Resource: !Ref EcrRepositoryArn
+              - Sid: RecordTheDeployedImage
+                Effect: Allow
+                Action:
+                  - 'ssm:PutParameter'
+                  - 'ssm:GetParameter'
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/image/*'
 
 Outputs:
+  GitHubAppRoleArn:
+    Description: Set as secret AWS_ROLE_ARN in the application repository
+    Value: !GetAtt GitHubAppRole.Arn
+
   TaskExecutionRoleArn:
     Value: !GetAtt TaskExecutionRole.Arn
 

@@ -1,0 +1,62 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: photo-uploader alerting - the topic every alarm and the pipeline publish to
+
+# Built first: service.yaml, pipeline.yaml and monitoring.yaml all need the
+# topic ARN, and nothing else in the stack depends on it.
+
+Parameters:
+  ProjectName: { Type: String }
+
+  AlertEmail:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$'
+    ConstraintDescription: An email address, or blank for no subscription.
+    Description: Leave blank to create the topic without a subscription.
+
+Conditions:
+  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, '']]
+
+Resources:
+
+  Topic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ProjectName}-alerts'
+      DisplayName: !Sub '${ProjectName} alerts'
+
+  # CloudWatch and EventBridge publish here on their own behalf, so the topic
+  # has to name them. Without this the alarms fire and nothing is delivered.
+  TopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref Topic
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowServicesToPublish
+            Effect: Allow
+            Principal:
+              Service:
+                - cloudwatch.amazonaws.com
+                - events.amazonaws.com
+            Action: 'sns:Publish'
+            Resource: !Ref Topic
+            Condition:
+              StringEquals:
+                'AWS:SourceAccount': !Ref AWS::AccountId
+
+  # Conditional, so a blank address still gets a topic. AWS emails a
+  # confirmation link that has to be clicked before anything is delivered.
+  Subscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlertEmail
+    Properties:
+      TopicArn: !Ref Topic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+Outputs:
+  TopicArn:
+    Value: !Ref Topic

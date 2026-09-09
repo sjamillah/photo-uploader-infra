@@ -1,0 +1,159 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: photo-uploader security groups - four groups and every rule between them
+
+# Apart from network.yaml so least privilege is one short file.
+# Rules are separate resources: inline ones between two groups deadlock.
+
+Parameters:
+  ProjectName: { Type: String }
+  VpcId: { Type: AWS::EC2::VPC::Id }
+
+  S3PrefixListId:
+    Type: String
+    Description: >-
+      Assigned by AWS per region and returned by no resource, so it is read from
+      Parameter Store by main.yaml and handed down.
+
+Resources:
+
+
+  # Groups are declared bare and every rule is a separate resource. Inline
+  # rules referencing another group in the same template are circular.
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Public ALB, accepts HTTP from the internet
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: Public HTTP
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-alb-sg'
+
+  EcsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Fargate tasks, ALB inbound and AWS-service outbound only
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-ecs-sg'
+
+  RdsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: PostgreSQL, reachable only from the tasks
+      VpcId: !Ref VpcId
+      # Omitting SecurityGroupEgress gets an implicit allow-all-outbound.
+      # A rule to an unroutable address is how you actually close a group.
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 127.0.0.1/32
+          Description: No egress required
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-rds-sg'
+
+  VpcEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Interface endpoint ENIs, HTTPS from the tasks
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 127.0.0.1/32
+          Description: No egress required, responses are stateful
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-vpce-sg'
+
+  # --- Security group rules -------------------------------------------------
+
+  AlbToEcsEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref AlbSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort: 8080
+      DestinationSecurityGroupId: !Ref EcsSecurityGroup
+      Description: Traffic to the containers
+
+  # The listener port is what the ALB accepts; this is the target port it
+  # connects to, and both target groups use it.
+  EcsFromAlbIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EcsSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort: 8080
+      SourceSecurityGroupId: !Ref AlbSecurityGroup
+      Description: Gunicorn
+
+  EcsToEndpointsEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref EcsSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      DestinationSecurityGroupId: !Ref VpcEndpointSecurityGroup
+      Description: ECR, CloudWatch Logs, Secrets Manager, SSM Messages
+
+  EcsToS3Egress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref EcsSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      DestinationPrefixListId: !Ref S3PrefixListId
+      Description: S3 gateway endpoint, image layers and photo objects
+
+  EcsToRdsEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref EcsSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      DestinationSecurityGroupId: !Ref RdsSecurityGroup
+      Description: PostgreSQL
+
+  RdsFromEcsIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref RdsSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref EcsSecurityGroup
+      Description: PostgreSQL from the application tasks
+
+  EndpointsFromEcsIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref VpcEndpointSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Ref EcsSecurityGroup
+      Description: HTTPS to the endpoint ENIs
+
+Outputs:
+  AlbSecurityGroupId:
+    Value: !Ref AlbSecurityGroup
+
+  EcsSecurityGroupId:
+    Value: !Ref EcsSecurityGroup
+
+  RdsSecurityGroupId:
+    Value: !Ref RdsSecurityGroup
+
+  VpcEndpointSecurityGroupId:
+    Value: !Ref VpcEndpointSecurityGroup

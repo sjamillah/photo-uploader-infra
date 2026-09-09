@@ -1,0 +1,61 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::LanguageExtensions
+Description: photo-uploader VPC endpoints - what replaces a NAT gateway
+
+# These are why the private subnets need no route to the internet, and why
+# there is no NAT gateway at roughly $32 per AZ per month.
+
+Mappings:
+  # Keys become the logical ids (VpcEndpointEcrApi and so on); the values are
+  # the service names, which cannot be logical ids because of the dots.
+  EndpointServices:
+    EcrApi: { Service: ecr.api }
+    EcrDkr: { Service: ecr.dkr }
+    Logs: { Service: logs }
+    SecretsManager: { Service: secretsmanager }
+    SsmMessages: { Service: ssmmessages }
+
+Parameters:
+  ProjectName: { Type: String }
+  VpcId: { Type: AWS::EC2::VPC::Id }
+  AppSubnetIds: { Type: List<AWS::EC2::Subnet::Id> }
+  RouteTableIds: { Type: CommaDelimitedList }
+  EndpointSecurityGroupId: { Type: AWS::EC2::SecurityGroup::Id }
+
+Resources:
+
+
+  # Free, and required for ECR pulls: image layers are stored in S3.
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        !Ref RouteTableIds
+
+  # ECR pulls need api and dkr, log delivery needs logs, secret injection needs
+  # secretsmanager, ECS Exec needs ssmmessages.
+  Fn::ForEach::InterfaceEndpoints:
+    - Name
+    - [EcrApi, EcrDkr, Logs, SecretsManager, SsmMessages]
+    - VpcEndpoint${Name}:
+        Type: AWS::EC2::VPCEndpoint
+        Metadata:
+          cfn-lint:
+            config:
+              # E3064 cannot resolve the service name through FindInMap, so it
+              # reads five identical endpoints. They are distinct.
+              ignore_checks: [E3064]
+        Properties:
+          VpcId: !Ref VpcId
+          ServiceName: !Sub
+            - 'com.amazonaws.${AWS::Region}.${Svc}'
+            - Svc: !FindInMap [EndpointServices, !Ref Name, Service]
+          VpcEndpointType: Interface
+          PrivateDnsEnabled: true
+          SubnetIds:
+            !Ref AppSubnetIds
+          SecurityGroupIds:
+            - !Ref EndpointSecurityGroupId

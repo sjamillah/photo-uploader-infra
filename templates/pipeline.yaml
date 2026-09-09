@@ -4,6 +4,9 @@ Description: photo-uploader CodePipeline - EventBridge trigger and CodeDeploy ha
 Parameters:
   ProjectName: { Type: String }
 
+  ArtifactBucketName: { Type: String }
+  PipelineName: { Type: String }
+
   AlertTopicArn: { Type: String }
 
   ConnectionArn:
@@ -39,7 +42,7 @@ Resources:
     Type: AWS::S3::Bucket
     DeletionPolicy: Delete
     Properties:
-      BucketName: !Sub '${ProjectName}-artifacts-${AWS::AccountId}-${AWS::Region}'
+      BucketName: !Ref ArtifactBucketName
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -66,7 +69,7 @@ Resources:
   Pipeline:
     Type: AWS::CodePipeline::Pipeline
     Properties:
-      Name: !Sub '${ProjectName}-pipeline'
+      Name: !Ref PipelineName
       PipelineType: V2
       ExecutionMode: QUEUED
       RoleArn: !Ref PipelineRoleArn

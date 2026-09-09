@@ -1,12 +1,8 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: photo-uploader CloudWatch alarms - the ones that notify, not the ones that block
 
-# Everything here publishes to SNS and nothing else acts on it. The two alarms
-# CodeDeploy blocks a cutover on are in ecs.yaml, because they have to
-# exist before the deployment group that names them.
-#
-# Deployed last, since the dimensions come from the database, the load
-# balancer and the service.
+# Notify only. The alarms that can stop a deployment are in codedeploy.yaml.
+# Deployed last: the dimensions come from the other stacks.
 
 Parameters:
   ProjectName: { Type: String }

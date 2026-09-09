@@ -92,5 +92,5 @@ Outputs:
     Value: !Ref DbSecret
 
   DbInstanceIdentifier:
-    Description: Dimension value for the alarms in cloudwatch.yaml
+    Description: Dimension value for the alarms in monitoring.yaml
     Value: !Ref Database

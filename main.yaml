@@ -1,34 +1,24 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: photo-uploader main stack - composes the eight templates in templates/
 
-# Deployed in this order, which CloudFormation works out from the !GetAtt
-# references between them:
-#
-#   vpc.yaml            subnets, routing, VPC endpoints, security groups
-#   s3-cloudfront.yaml  private media bucket behind a distribution
-#   rds.yaml            PostgreSQL and its generated credentials
-#   iam.yaml            every role the running system assumes
-#   ecs.yaml            load balancer and listeners, cluster and service,
-#                       auto scaling, CodeDeploy
-#   codepipeline.yaml   EventBridge rule, pipeline, artifact bucket
-#   cloudwatch.yaml     alarms that notify, not ones that block
-#
-# ECR is not here. It lives in bootstrap.yaml, because an image has to exist
-# before this stack creates the service that runs one.
-#
-# Values flow down as parameters, so the children use no Fn::ImportValue at
-# all. The three here are the boundary with the bootstrap stack.
-#
-# Defaults live here and nowhere else. A child parameter this file passes has
-# no default of its own, so there is one place to read the current value.
+# Order comes from the !GetAtt references between the children; values flow
+# down as parameters, so none of them uses Fn::ImportValue.
+
+# The last four are conditional. A service cannot start before CI has pushed
+# an image into the registry this same stack has only just created.
 
 Metadata:
+  # Children are referenced by path; make package rewrites them into bucket
+  # URLs and writes main.packaged.yaml, which is what Git sync deploys.
+  cfn-lint:
+    config:
+      ignore_checks:
+        - W3002
+
   AWS::CloudFormation::Interface:
     ParameterGroups:
       - Label: { default: Naming }
         Parameters: [ProjectName]
-      - Label: { default: Template staging }
-        Parameters: [TemplateBucket, TemplateVersion]
       - Label: { default: Addressing }
         Parameters: [VpcCidr, PublicTierCidr, AppTierCidr, DataTierCidr, S3PrefixListId]
       - Label: { default: Database }
@@ -46,22 +36,10 @@ Metadata:
         Parameters: [ConnectionArn, GitHubOrg, GitHubAppRepo, GitHubBranch]
 
 Parameters:
+
   ProjectName:
     Type: String
     Default: photo-app
-
-  # Parameter Store keeps anything account-specific out of the repository.
-  # The value supplied is the parameter NAME; CloudFormation resolves it.
-  TemplateBucket:
-    Type: AWS::SSM::Parameter::Value<String>
-    Default: /photo-app/template-bucket
-
-  TemplateVersion:
-    Type: String
-    AllowedPattern: '^[0-9a-f]{40}$'
-    Description: >-
-      Commit the children were staged under. Rewritten by the stage job
-      in .github/workflows/ci.yml; not edited by hand.
 
   VpcCidr:
     Type: String
@@ -108,6 +86,21 @@ Parameters:
     Default: 'true'
     AllowedValues: ['true', 'false']
 
+  AlertEmail:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$'
+    ConstraintDescription: An email address, or blank for no subscription.
+    Description: Where alarms are delivered. Blank creates the topic without one.
+
+  DeployApplication:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      false on the first pass, which builds the registry. Push an image, then
+      set it to true: the service cannot start without one.
+
   TriggerImageTag:
     Type: String
     Default: latest
@@ -152,12 +145,33 @@ Parameters:
     Type: String
     Default: main
 
+Conditions:
+  DeployApplication: !Equals [!Ref DeployApplication, 'true']
+
 Resources:
+
+  # CI pushes into this, and only then can the service find something to run.
+  EcrStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: templates/ecr.yaml
+      TimeoutInMinutes: 15
+      Parameters:
+        ProjectName: !Ref ProjectName
+
+  AlertsStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: templates/alerts.yaml
+      TimeoutInMinutes: 15
+      Parameters:
+        ProjectName: !Ref ProjectName
+        AlertEmail: !Ref AlertEmail
 
   VpcStack:
     Type: AWS::CloudFormation::Stack
     Properties:
-      TemplateURL: !Sub 'https://${TemplateBucket}.s3.${AWS::Region}.amazonaws.com/${TemplateVersion}/vpc.yaml'
+      TemplateURL: templates/network.yaml
       TimeoutInMinutes: 20
       Parameters:
         ProjectName: !Ref ProjectName
@@ -167,10 +181,34 @@ Resources:
         DataTierCidr: !Ref DataTierCidr
         S3PrefixListId: !Ref S3PrefixListId
 
+  # Read on its own: this is the file to check least privilege in.
+  SecurityStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: templates/security.yaml
+      TimeoutInMinutes: 15
+      Parameters:
+        ProjectName: !Ref ProjectName
+        VpcId: !GetAtt VpcStack.Outputs.VpcId
+        S3PrefixListId: !Ref S3PrefixListId
+
+  # What replaces a NAT gateway.
+  EndpointsStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: templates/endpoints.yaml
+      TimeoutInMinutes: 20
+      Parameters:
+        ProjectName: !Ref ProjectName
+        VpcId: !GetAtt VpcStack.Outputs.VpcId
+        AppSubnetIds: !GetAtt VpcStack.Outputs.PrivateAppSubnets
+        RouteTableIds: !GetAtt VpcStack.Outputs.PrivateRouteTables
+        EndpointSecurityGroupId: !GetAtt SecurityStack.Outputs.VpcEndpointSecurityGroupId
+
   S3CloudFrontStack:
     Type: AWS::CloudFormation::Stack
     Properties:
-      TemplateURL: !Sub 'https://${TemplateBucket}.s3.${AWS::Region}.amazonaws.com/${TemplateVersion}/s3-cloudfront.yaml'
+      TemplateURL: templates/media.yaml
       TimeoutInMinutes: 30
       Parameters:
         ProjectName: !Ref ProjectName
@@ -178,39 +216,48 @@ Resources:
   RdsStack:
     Type: AWS::CloudFormation::Stack
     Properties:
-      TemplateURL: !Sub 'https://${TemplateBucket}.s3.${AWS::Region}.amazonaws.com/${TemplateVersion}/rds.yaml'
+      TemplateURL: templates/database.yaml
       # Multi-AZ PostgreSQL is the slow one; everything else finishes inside this.
       TimeoutInMinutes: 45
       Parameters:
         ProjectName: !Ref ProjectName
         DataSubnetIds: !GetAtt VpcStack.Outputs.PrivateDataSubnets
-        RdsSecurityGroupId: !GetAtt VpcStack.Outputs.RdsSecurityGroupId
+        RdsSecurityGroupId: !GetAtt SecurityStack.Outputs.RdsSecurityGroupId
         DbName: !Ref DbName
         DbInstanceClass: !Ref DbInstanceClass
         DbEngineVersion: !Ref DbEngineVersion
         DbMultiAZ: !Ref DbMultiAZ
 
+  # Defined here only. The roles are created before the resources they
+  # grant access to, so the name is handed to both stacks instead.
   IamStack:
     Type: AWS::CloudFormation::Stack
     Properties:
-      TemplateURL: !Sub 'https://${TemplateBucket}.s3.${AWS::Region}.amazonaws.com/${TemplateVersion}/iam.yaml'
+      TemplateURL: templates/iam.yaml
       TimeoutInMinutes: 15
       Parameters:
         ProjectName: !Ref ProjectName
+        EcrRepositoryArn: !GetAtt EcrStack.Outputs.RepositoryArn
+        GitHubOrg: !Ref GitHubOrg
+        GitHubAppRepo: !Ref GitHubAppRepo
+        GitHubBranch: !Ref GitHubBranch
+        ArtifactBucketName: !Sub '${ProjectName}-artifacts-${AWS::AccountId}-${AWS::Region}'
+        PipelineName: !Sub '${ProjectName}-pipeline'
         MediaBucketArn: !GetAtt S3CloudFrontStack.Outputs.MediaBucketArn
         DbSecretArn: !GetAtt RdsStack.Outputs.DbSecretArn
         ConnectionArn: !Ref ConnectionArn
 
   EcsStack:
+    Condition: DeployApplication
     Type: AWS::CloudFormation::Stack
     Properties:
-      TemplateURL: !Sub 'https://${TemplateBucket}.s3.${AWS::Region}.amazonaws.com/${TemplateVersion}/ecs.yaml'
+      TemplateURL: templates/service.yaml
       TimeoutInMinutes: 30
       Parameters:
         ProjectName: !Ref ProjectName
-        AlertTopicArn: {'Fn::ImportValue': !Sub '${ProjectName}-AlertTopicArn'}
+        AlertTopicArn: !GetAtt AlertsStack.Outputs.TopicArn
         AppSubnetIds: !GetAtt VpcStack.Outputs.PrivateAppSubnets
-        EcsSecurityGroupId: !GetAtt VpcStack.Outputs.EcsSecurityGroupId
+        EcsSecurityGroupId: !GetAtt SecurityStack.Outputs.EcsSecurityGroupId
         MediaBucketName: !GetAtt S3CloudFrontStack.Outputs.MediaBucketName
         CloudFrontDomain: !GetAtt S3CloudFrontStack.Outputs.CloudFrontDomain
         DbSecretArn: !GetAtt RdsStack.Outputs.DbSecretArn
@@ -219,16 +266,12 @@ Resources:
         CodeDeployRoleArn: !GetAtt IamStack.Outputs.CodeDeployRoleArn
         VpcId: !GetAtt VpcStack.Outputs.VpcId
         PublicSubnetIds: !GetAtt VpcStack.Outputs.PublicSubnets
-        AlbSecurityGroupId: !GetAtt VpcStack.Outputs.AlbSecurityGroupId
-        # A tag, and the same string on every stack update. The service uses
-        # the CODE_DEPLOY controller and ECS rejects any attempt by
-        # CloudFormation to move such a service onto a different task
-        # definition, so anything that varies here fails the update. Resolved
-        # once, when the service is created; CodeDeploy owns the image after
-        # that, pinning a digest out of imageDetail.json.
+        AlbSecurityGroupId: !GetAtt SecurityStack.Outputs.AlbSecurityGroupId
+        # Must be identical on every update: ECS refuses to move a CODE_DEPLOY
+        # service onto a new task definition. CodeDeploy owns the image.
         ImageUri: !Sub
           - '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${Repo}:${Tag}'
-          - Repo: {'Fn::ImportValue': !Sub '${ProjectName}-EcrRepositoryName'}
+          - Repo: !GetAtt EcrStack.Outputs.RepositoryName
             Tag: !Ref TriggerImageTag
         ContainerPort: !Ref ContainerPort
         TaskCpu: !Ref TaskCpu
@@ -237,33 +280,56 @@ Resources:
         MaxCapacity: !Ref MaxCapacity
         CpuTargetPercent: !Ref CpuTargetPercent
 
-  CodePipelineStack:
+  # CodeDeploy owns the relationship between the service and the two target
+  # groups, so it is described apart from the service that creates them.
+  CodeDeployStack:
+    Condition: DeployApplication
     Type: AWS::CloudFormation::Stack
     Properties:
-      TemplateURL: !Sub 'https://${TemplateBucket}.s3.${AWS::Region}.amazonaws.com/${TemplateVersion}/codepipeline.yaml'
+      TemplateURL: templates/codedeploy.yaml
+      TimeoutInMinutes: 15
+      Parameters:
+        ProjectName: !Ref ProjectName
+        AlertTopicArn: !GetAtt AlertsStack.Outputs.TopicArn
+        CodeDeployRoleArn: !GetAtt IamStack.Outputs.CodeDeployRoleArn
+        ClusterName: !GetAtt EcsStack.Outputs.ClusterName
+        ServiceName: !GetAtt EcsStack.Outputs.ServiceName
+        TargetGroupBlueName: !GetAtt EcsStack.Outputs.TargetGroupBlueName
+        TargetGroupGreenName: !GetAtt EcsStack.Outputs.TargetGroupGreenName
+        ListenerArn: !GetAtt EcsStack.Outputs.ListenerArn
+        LoadBalancerFullName: !GetAtt EcsStack.Outputs.LoadBalancerFullName
+
+  CodePipelineStack:
+    Condition: DeployApplication
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: templates/pipeline.yaml
       TimeoutInMinutes: 20
       Parameters:
         ProjectName: !Ref ProjectName
-        AlertTopicArn: {'Fn::ImportValue': !Sub '${ProjectName}-AlertTopicArn'}
+        ArtifactBucketName: !Sub '${ProjectName}-artifacts-${AWS::AccountId}-${AWS::Region}'
+        PipelineName: !Sub '${ProjectName}-pipeline'
+        AlertTopicArn: !GetAtt AlertsStack.Outputs.TopicArn
         ConnectionArn: !Ref ConnectionArn
         GitHubOrg: !Ref GitHubOrg
         GitHubAppRepo: !Ref GitHubAppRepo
         GitHubBranch: !Ref GitHubBranch
         PipelineRoleArn: !GetAtt IamStack.Outputs.PipelineRoleArn
         EventBridgeRoleArn: !GetAtt IamStack.Outputs.EventBridgeRoleArn
-        EcrRepositoryName: {'Fn::ImportValue': !Sub '${ProjectName}-EcrRepositoryName'}
+        EcrRepositoryName: !GetAtt EcrStack.Outputs.RepositoryName
         TriggerImageTag: !Ref TriggerImageTag
-        CodeDeployApplicationName: !GetAtt EcsStack.Outputs.CodeDeployApplicationName
-        CodeDeployDeploymentGroupName: !GetAtt EcsStack.Outputs.CodeDeployDeploymentGroupName
+        CodeDeployApplicationName: !GetAtt CodeDeployStack.Outputs.ApplicationName
+        CodeDeployDeploymentGroupName: !GetAtt CodeDeployStack.Outputs.DeploymentGroupName
 
   CloudWatchStack:
+    Condition: DeployApplication
     Type: AWS::CloudFormation::Stack
     Properties:
-      TemplateURL: !Sub 'https://${TemplateBucket}.s3.${AWS::Region}.amazonaws.com/${TemplateVersion}/cloudwatch.yaml'
+      TemplateURL: templates/monitoring.yaml
       TimeoutInMinutes: 15
       Parameters:
         ProjectName: !Ref ProjectName
-        AlertTopicArn: {'Fn::ImportValue': !Sub '${ProjectName}-AlertTopicArn'}
+        AlertTopicArn: !GetAtt AlertsStack.Outputs.TopicArn
         DbInstanceIdentifier: !GetAtt RdsStack.Outputs.DbInstanceIdentifier
         LoadBalancerFullName: !GetAtt EcsStack.Outputs.LoadBalancerFullName
         TargetGroupBlueFullName: !GetAtt EcsStack.Outputs.TargetGroupBlueFullName
@@ -273,6 +339,7 @@ Resources:
 
 Outputs:
   ApplicationUrl:
+    Condition: DeployApplication
     Description: Public application endpoint
     Value: !Sub
       - 'http://${Dns}'
@@ -282,10 +349,13 @@ Outputs:
     Value: !GetAtt S3CloudFrontStack.Outputs.CloudFrontDomain
 
   ClusterName:
+    Condition: DeployApplication
     Value: !GetAtt EcsStack.Outputs.ClusterName
 
   ServiceName:
+    Condition: DeployApplication
     Value: !GetAtt EcsStack.Outputs.ServiceName
 
   PipelineName:
+    Condition: DeployApplication
     Value: !GetAtt CodePipelineStack.Outputs.PipelineName

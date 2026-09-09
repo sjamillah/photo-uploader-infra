@@ -1,0 +1,60 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: photo-uploader container registry - the ECR repository
+
+# Built on the first pass, before DeployApplication is flipped on. CI pushes an
+# image into it, and only then does service.yaml have something to run.
+
+Parameters:
+  ProjectName: { Type: String }
+
+  KeepImages:
+    Type: Number
+    Default: 3
+    MinValue: 2
+    MaxValue: 20
+    Description: >-
+      The running image plus its rollback targets. Nothing spares an image a
+      task definition still pins, so this is a floor rather than a guarantee.
+
+Resources:
+
+  Repository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref ProjectName
+      # Mutable on purpose: moving :latest is what fires the EventBridge rule
+      # that starts the pipeline. Immutable tags would break the trigger.
+      ImageTagMutability: MUTABLE
+      EmptyOnDelete: true
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      # One rule, because tagStatus any already covers untagged images, and
+      # every build tags its own commit sha so images barely ever go untagged.
+      LifecyclePolicy:
+        LifecyclePolicyText: !Sub |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep the most recent images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": ${KeepImages}
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+
+Outputs:
+  RepositoryArn:
+    Value: !GetAtt Repository.Arn
+
+  RepositoryName:
+    Value: !Ref Repository
+
+  RepositoryUri:
+    Value: !GetAtt Repository.RepositoryUri

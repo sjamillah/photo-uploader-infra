@@ -1,18 +1,8 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: photo-uploader bootstrap - IAM, OIDC, ECR, template staging, alerting
+Description: photo-uploader bootstrap - what must exist before Git sync or CI can run
 
-# Created once by hand, then adopted by Git sync like every other stack.
-#
-# The first creation cannot be Git-synced, because this stack is what creates
-# the roles Git sync assumes. After that, deployments/bootstrap.yaml drives
-# it from the repository.
-#
-#   aws cloudformation deploy --stack-name photo-app-bootstrap \
-#     --template-file bootstrap.yaml --capabilities CAPABILITY_NAMED_IAM \
-#     --parameter-overrides GitHubOrg=... AlertEmail=...
-#
-# If a push ever breaks GitSyncRole or CfnDeploymentRole, CloudFormation rolls
-# the update back. Recovery is re-running the command above.
+# Created by hand once: this stack makes the roles Git sync assumes.
+# deployments/bootstrap.yaml drives it from the repository after that.
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -20,9 +10,7 @@ Metadata:
       - Label: { default: Naming }
         Parameters: [ProjectName]
       - Label: { default: Source control }
-        Parameters: [GitHubOrg, GitHubInfraRepo, GitHubAppRepo, GitHubBranch]
-      - Label: { default: Alerting }
-        Parameters: [AlertEmail]
+        Parameters: [GitHubOrg, GitHubInfraRepo, GitHubBranch]
 
 Parameters:
   ProjectName:
@@ -34,20 +22,13 @@ Parameters:
     Type: String
     AllowedPattern: '^[A-Za-z0-9][A-Za-z0-9-]{0,38}$'
     ConstraintDescription: >-
-      A GitHub account name. Case matters: it has to match the owner in the
-      repository URL exactly, because the OIDC subject claim is compared with
-      StringLike and no case folding.
+      Must match the owner in the repository URL exactly. The subject claim is
+      compared with StringLike and no case folding.
     Description: Organisation or username that owns both repositories.
 
   GitHubInfraRepo:
     Type: String
     Default: photo-uploader-infra
-    AllowedPattern: '^[A-Za-z0-9._-]{1,100}$'
-    ConstraintDescription: A repository name on its own, not a full URL.
-
-  GitHubAppRepo:
-    Type: String
-    Default: photo-uploader-app
     AllowedPattern: '^[A-Za-z0-9._-]{1,100}$'
     ConstraintDescription: A repository name on its own, not a full URL.
 
@@ -60,25 +41,15 @@ Parameters:
       The only branch permitted to assume either Actions role. Must match
       on.push.branches in both workflows and the Git sync branch.
 
-  AlertEmail:
-    Type: String
-    Default: ''
-    AllowedPattern: '^$|^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$'
-    ConstraintDescription: An email address, or blank for no subscription.
-    Description: Leave blank to create the topic without a subscription.
-
   CreateOidcProvider:
     Type: String
     Default: 'false'
     AllowedValues: ['true', 'false']
     Description: >-
-      IAM allows one provider per URL per account. Leave false if
-      token.actions.githubusercontent.com already exists; the roles below
-      reference it either way. Check with:
-      aws iam list-open-id-connect-providers
+      One provider per URL per account. Leave false if the GitHub one already
+      exists; check with aws iam list-open-id-connect-providers.
 
 Conditions:
-  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, '']]
   NeedsOidcProvider: !Equals [!Ref CreateOidcProvider, 'true']
 
 Resources:
@@ -144,89 +115,16 @@ Resources:
       Value: !Ref TemplateBucket
       Description: Bucket holding the staged child templates
 
-  # --- Container registry ---------------------------------------------------
-
-  # Lives here, not in the platform child, so an image can be pushed before
-  # the main stack creates the service that needs one.
-  EcrRepository:
-    Type: AWS::ECR::Repository
+  # Read by main.yaml for the nested TemplateURLs and by the workflow, so the
+  # templates land where the stack looks for them.
+  TemplatePrefixParameter:
+    Type: AWS::SSM::Parameter
     Properties:
-      RepositoryName: !Ref ProjectName
-      ImageTagMutability: MUTABLE
-      EmptyOnDelete: true
-      ImageScanningConfiguration:
-        ScanOnPush: true
-      EncryptionConfiguration:
-        EncryptionType: AES256
-      LifecyclePolicy:
-        # One rule, because tagStatus any already covers untagged images and a
-        # separate untagged rule would only expire them sooner. Every build
-        # tags its own commit sha, so images barely ever go untagged anyway.
-        #
-        # Three is the running image plus two rollback targets. CodeDeploy
-        # rolls back to a task definition that pins a digest, and nothing here
-        # spares an image still referenced that way, so pushing three builds
-        # without deploying leaves the running image expired and a replacement
-        # task unable to start.
-        LifecyclePolicyText: |
-          {
-            "rules": [
-              {
-                "rulePriority": 1,
-                "description": "Keep the three most recent images",
-                "selection": {
-                  "tagStatus": "any",
-                  "countType": "imageCountMoreThan",
-                  "countNumber": 3
-                },
-                "action": { "type": "expire" }
-              }
-            ]
-          }
+      Name: !Sub '/${ProjectName}/template-prefix'
+      Type: String
+      Value: latest
+      Description: Prefix in the template bucket the child templates are synced to
 
-  # --- Alerting -------------------------------------------------------------
-
-  AlertTopic:
-    Type: AWS::SNS::Topic
-    Properties:
-      TopicName: !Sub '${ProjectName}-alerts'
-      DisplayName: !Sub '${ProjectName} alerts'
-      KmsMasterKeyId: alias/aws/sns
-
-  AlertTopicPolicy:
-    Type: AWS::SNS::TopicPolicy
-    Properties:
-      Topics:
-        - !Ref AlertTopic
-      PolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Sid: AllowCloudWatchAndEventBridge
-            Effect: Allow
-            Principal:
-              Service:
-                - cloudwatch.amazonaws.com
-                - events.amazonaws.com
-            Action: 'sns:Publish'
-            Resource: !Ref AlertTopic
-            Condition:
-              StringEquals:
-                'aws:SourceAccount': !Ref AWS::AccountId
-
-  AlertSubscription:
-    Type: AWS::SNS::Subscription
-    Condition: HasAlertEmail
-    Properties:
-      TopicArn: !Ref AlertTopic
-      Protocol: email
-      # AWS sends a confirmation link; the subscription is inert until someone
-      # clicks it.
-      Endpoint: !Ref AlertEmail
-
-  # --- GitHub Actions, via OIDC ---------------------------------------------
-
-  # Account-global, so it is created only when the account does not already
-  # have one. The ARN is deterministic either way, which is what the roles use.
   GitHubOidcProvider:
     Type: AWS::IAM::OIDCProvider
     Condition: NeedsOidcProvider
@@ -259,11 +157,8 @@ Resources:
                 # present a token to this role.
                 'token.actions.githubusercontent.com:aud': sts.amazonaws.com
               StringLike:
-                # GitHub appends numeric owner and repository IDs so the
-                # claim survives a rename, giving repo:<owner>@<id>/<repo>@<id>.
-                # Both shapes are accepted. The literal @ after the name anchors
-                # the wildcard, so an account whose name merely begins the same
-                # way cannot match.
+                # GitHub appends numeric ids so the claim survives a rename.
+                # Both shapes accepted; the literal @ anchors the wildcard.
                 'token.actions.githubusercontent.com:sub':
                   - !Sub 'repo:${GitHubOrg}/${GitHubInfraRepo}:ref:refs/heads/${GitHubBranch}'
                   - !Sub 'repo:${GitHubOrg}@*/${GitHubInfraRepo}@*:ref:refs/heads/${GitHubBranch}'
@@ -283,70 +178,21 @@ Resources:
                   - 's3:GetBucketLocation'
                 Resource: !GetAtt TemplateBucket.Arn
 
-  GitHubAppRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub '${ProjectName}-gha-app'
-      Description: GitHub Actions in the application repo, pushing images to ECR
-      MaxSessionDuration: 3600
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Federated: !If
-                - NeedsOidcProvider
-                - !Ref GitHubOidcProvider
-                - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
-            Action: 'sts:AssumeRoleWithWebIdentity'
-            Condition:
-              StringEquals:
-                'token.actions.githubusercontent.com:aud': sts.amazonaws.com
-              StringLike:
-                # GitHub appends numeric owner and repository IDs so the
-                # claim survives a rename, giving repo:<owner>@<id>/<repo>@<id>.
-                # Both shapes are accepted. The literal @ after the name anchors
-                # the wildcard, so an account whose name merely begins the same
-                # way cannot match.
-                'token.actions.githubusercontent.com:sub':
-                  - !Sub 'repo:${GitHubOrg}/${GitHubAppRepo}:ref:refs/heads/${GitHubBranch}'
-                  - !Sub 'repo:${GitHubOrg}@*/${GitHubAppRepo}@*:ref:refs/heads/${GitHubBranch}'
-      Policies:
-        - PolicyName: ecr-push
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Sid: AuthTokenIsAccountWide
-                Effect: Allow
-                Action: 'ecr:GetAuthorizationToken'
-                Resource: '*'
-              - Sid: PushToThisRepositoryOnly
-                Effect: Allow
-                Action:
-                  - 'ecr:BatchCheckLayerAvailability'
-                  - 'ecr:InitiateLayerUpload'
-                  - 'ecr:UploadLayerPart'
-                  - 'ecr:CompleteLayerUpload'
-                  - 'ecr:PutImage'
-                  - 'ecr:BatchGetImage'
-                  - 'ecr:GetDownloadUrlForLayer'
-                  # publish-image.sh reads back the digest it just pushed, so
-                  # Parameter Store records an immutable reference instead of
-                  # a tag that can be moved underneath a deployment.
-                  - 'ecr:DescribeImages'
-                Resource: !GetAtt EcrRepository.Arn
-              - Sid: RecordTheDeployedImage
-                Effect: Allow
-                Action:
-                  - 'ssm:PutParameter'
-                  - 'ssm:GetParameter'
-                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/image/*'
-
-  # --- CloudFormation and Git sync ------------------------------------------
+              # Where to sync. The script reads both rather than taking them
+              # as arguments, so the bucket and prefix are defined once.
+              - Effect: Allow
+                Action: 'ssm:GetParameter'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/template-bucket'
+                  - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/template-prefix'
 
   # Assumed by CloudFormation to build the stacks. Nothing else can use it.
   CfnDeploymentRole:
     Type: AWS::IAM::Role
+    # Retained: CloudFormation assumes this to tear the stack down, and
+    # deleting it partway strands the delete. Remove it by hand afterwards.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       RoleName: !Sub '${ProjectName}-cfn-deployment'
       Description: Assumed by CloudFormation to provision the photo-uploader stacks
@@ -393,10 +239,7 @@ Resources:
                   - 'ssm:DescribeParameters'
                 Resource: '*'
 
-              # Everything here encrypts with an AWS managed key, never a
-              # customer key. CloudFormation still needs these when it creates
-              # the encrypted RDS instance and the database secret. ViaService
-              # means the role cannot reach a key on its own.
+              # AWS managed keys only. ViaService stops the role reaching a key alone.
               - Sid: EncryptionThroughTheseServicesOnly
                 Effect: Allow
                 Action:
@@ -479,6 +322,9 @@ Resources:
   # Assumed by Git sync to read the repository and drive CloudFormation.
   GitSyncRole:
     Type: AWS::IAM::Role
+    # Retained for the same reason as CfnDeploymentRole above.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       RoleName: !Sub '${ProjectName}-gitsync'
       Description: Assumed by CloudFormation Git sync to deploy from the repository
@@ -534,10 +380,8 @@ Resources:
                 Resource:
                   - !GetAtt TemplateBucket.Arn
                   - !Sub '${TemplateBucket.Arn}/*'
-              # Git sync watches the repository through an EventBridge rule it
-              # creates itself. The rule name is generated by the service, so
-              # it cannot be scoped by name. Delete and Remove are here so a
-              # sync can be turned off again without leaving a rule behind.
+              # Git sync creates its own watch rule; the name is generated by the
+              # service, so it cannot be scoped by name.
               - Sid: ManageTheSyncEventRule
                 Effect: Allow
                 Action:
@@ -563,33 +407,14 @@ Resources:
 
 Outputs:
   TemplateBucketName:
-    Description: Set as secret TEMPLATE_BUCKET in the infrastructure repository
+    Description: Published to Parameter Store as well; CI reads it from there
     Value: !Ref TemplateBucket
     Export:
       Name: !Sub '${ProjectName}-TemplateBucketName'
 
-  EcrRepositoryUri:
-    Value: !GetAtt EcrRepository.RepositoryUri
-    Export:
-      Name: !Sub '${ProjectName}-EcrRepositoryUri'
-
-  EcrRepositoryName:
-    Value: !Ref EcrRepository
-    Export:
-      Name: !Sub '${ProjectName}-EcrRepositoryName'
-
-  AlertTopicArn:
-    Value: !Ref AlertTopic
-    Export:
-      Name: !Sub '${ProjectName}-AlertTopicArn'
-
   GitHubInfraRoleArn:
     Description: Set as secret AWS_ROLE_ARN in the infrastructure repository
     Value: !GetAtt GitHubInfraRole.Arn
-
-  GitHubAppRoleArn:
-    Description: Set as secret AWS_ROLE_ARN in the application repository
-    Value: !GetAtt GitHubAppRole.Arn
 
   CfnDeploymentRoleArn:
     Description: Choose as the stack operations role when creating a synced stack

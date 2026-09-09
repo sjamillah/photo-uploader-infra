@@ -1,12 +1,20 @@
-template-file-path: main.yaml
+# Git sync has no packaging step, so it deploys the packaged file that
+# `make package` writes from main.yaml.
+template-file-path: main.packaged.yaml
 
 # Only what main.yaml cannot work out for itself. Anything account-specific
 # is read from Parameter Store by the template, so it never lands in git.
 parameters:
   ProjectName: photo-app
 
-  # Managed by the upload job in .github/workflows/ci.yml.
-  TemplateVersion: bbf09c14fed4d14a2b37b74c38eb5566fcbc6d9a
+
+  # Where alarms are delivered. AWS emails a confirmation link that has to be
+  # clicked before anything arrives.
+  AlertEmail: 'j.ssozi@alustudent.com'
+
+  # false on the first pass: network, roles, media, database and the registry
+  # only. Push an image, flip this to true, push again.
+  DeployApplication: 'true'
 
   GitHubOrg: sjamillah
 
