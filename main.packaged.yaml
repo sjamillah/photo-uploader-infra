@@ -1,0 +1,527 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: photo-uploader main stack - composes the eight templates in 
+  templates/
+Metadata:
+  cfn-lint:
+    config:
+      ignore_checks:
+      - W3002
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+    - Label:
+        default: Naming
+      Parameters:
+      - ProjectName
+    - Label:
+        default: Addressing
+      Parameters:
+      - VpcCidr
+      - PublicTierCidr
+      - AppTierCidr
+      - DataTierCidr
+      - S3PrefixListId
+    - Label:
+        default: Database
+      Parameters:
+      - DbName
+      - DbInstanceClass
+      - DbEngineVersion
+      - DbMultiAZ
+    - Label:
+        default: Application
+      Parameters:
+      - TriggerImageTag
+      - ContainerPort
+      - TaskCpu
+      - TaskMemory
+      - MinCapacity
+      - MaxCapacity
+      - CpuTargetPercent
+    - Label:
+        default: Source control
+      Parameters:
+      - ConnectionArn
+      - GitHubOrg
+      - GitHubAppRepo
+      - GitHubBranch
+Parameters:
+  ProjectName:
+    Type: String
+    Default: photo-app
+  VpcCidr:
+    Type: String
+    Default: 10.20.0.0/20
+    AllowedPattern: ^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$
+    ConstraintDescription: An IPv4 CIDR block, for example 10.20.0.0/20.
+  PublicTierCidr:
+    Type: String
+    Default: 10.20.0.0/22
+    AllowedPattern: ^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$
+    ConstraintDescription: An IPv4 CIDR block, for example 10.20.0.0/20.
+  AppTierCidr:
+    Type: String
+    Default: 10.20.4.0/22
+    AllowedPattern: ^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$
+    ConstraintDescription: An IPv4 CIDR block, for example 10.20.0.0/20.
+  DataTierCidr:
+    Type: String
+    Default: 10.20.8.0/22
+    AllowedPattern: ^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$
+    ConstraintDescription: An IPv4 CIDR block, for example 10.20.0.0/20.
+  S3PrefixListId:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /photo-app/s3-prefix-list-id
+  DbName:
+    Type: String
+    Default: photos
+  DbInstanceClass:
+    Type: String
+    Default: db.t3.micro
+  DbEngineVersion:
+    Type: String
+    Default: '16'
+  DbMultiAZ:
+    Type: String
+    Default: 'true'
+    AllowedValues:
+    - 'true'
+    - 'false'
+  AlertEmail:
+    Type: String
+    Default: ''
+    AllowedPattern: ^$|^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$
+    ConstraintDescription: An email address, or blank for no subscription.
+    Description: Where alarms are delivered. Blank creates the topic without 
+      one.
+  DeployApplication:
+    Type: String
+    Default: 'true'
+    AllowedValues:
+    - 'true'
+    - 'false'
+    Description: 'false on the first pass, which builds the registry. Push an image,
+      then set it to true: the service cannot start without one.'
+  TriggerImageTag:
+    Type: String
+    Default: latest
+    Description: Moving tag the EventBridge rule watches.
+  ContainerPort:
+    Type: Number
+    Default: 8080
+  TaskCpu:
+    Type: String
+    Default: '512'
+  TaskMemory:
+    Type: String
+    Default: '2048'
+  MinCapacity:
+    Type: Number
+    Default: 1
+  MaxCapacity:
+    Type: Number
+    Default: 4
+  CpuTargetPercent:
+    Type: Number
+    Default: 60
+  ConnectionArn:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /photo-app/connection-arn
+  GitHubOrg:
+    Type: String
+  GitHubAppRepo:
+    Type: String
+    Default: photo-uploader-app
+  GitHubBranch:
+    Type: String
+    Default: main
+Conditions:
+  DeployApplication:
+    Fn::Equals:
+    - Ref: DeployApplication
+    - 'true'
+Resources:
+  EcrStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: 
+        https://s3.eu-north-1.amazonaws.com/photo-app-templates-697863031884-eu-north-1/latest/f160209d40216c7db5a1a676c32618ff.template
+      TimeoutInMinutes: 15
+      Parameters:
+        ProjectName:
+          Ref: ProjectName
+  AlertsStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: 
+        https://s3.eu-north-1.amazonaws.com/photo-app-templates-697863031884-eu-north-1/latest/55fd162cf3f44b79af0514d3691d07b8.template
+      TimeoutInMinutes: 15
+      Parameters:
+        ProjectName:
+          Ref: ProjectName
+        AlertEmail:
+          Ref: AlertEmail
+  VpcStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: 
+        https://s3.eu-north-1.amazonaws.com/photo-app-templates-697863031884-eu-north-1/latest/b1f7040ac12fd6bcd6dd1a2c998f6e45.template
+      TimeoutInMinutes: 20
+      Parameters:
+        ProjectName:
+          Ref: ProjectName
+        VpcCidr:
+          Ref: VpcCidr
+        PublicTierCidr:
+          Ref: PublicTierCidr
+        AppTierCidr:
+          Ref: AppTierCidr
+        DataTierCidr:
+          Ref: DataTierCidr
+        S3PrefixListId:
+          Ref: S3PrefixListId
+  SecurityStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: 
+        https://s3.eu-north-1.amazonaws.com/photo-app-templates-697863031884-eu-north-1/latest/8df0f1f9d1d8f4183bf49d7713059062.template
+      TimeoutInMinutes: 15
+      Parameters:
+        ProjectName:
+          Ref: ProjectName
+        VpcId:
+          Fn::GetAtt:
+          - VpcStack
+          - Outputs.VpcId
+        S3PrefixListId:
+          Ref: S3PrefixListId
+  EndpointsStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: 
+        https://s3.eu-north-1.amazonaws.com/photo-app-templates-697863031884-eu-north-1/latest/05b4321f377e24634906d9d685487dd3.template
+      TimeoutInMinutes: 20
+      Parameters:
+        ProjectName:
+          Ref: ProjectName
+        VpcId:
+          Fn::GetAtt:
+          - VpcStack
+          - Outputs.VpcId
+        AppSubnetIds:
+          Fn::GetAtt:
+          - VpcStack
+          - Outputs.PrivateAppSubnets
+        RouteTableIds:
+          Fn::GetAtt:
+          - VpcStack
+          - Outputs.PrivateRouteTables
+        EndpointSecurityGroupId:
+          Fn::GetAtt:
+          - SecurityStack
+          - Outputs.VpcEndpointSecurityGroupId
+  S3CloudFrontStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: 
+        https://s3.eu-north-1.amazonaws.com/photo-app-templates-697863031884-eu-north-1/latest/f6f90d38d3f81beb64f37cdb4c7bf301.template
+      TimeoutInMinutes: 30
+      Parameters:
+        ProjectName:
+          Ref: ProjectName
+  RdsStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: 
+        https://s3.eu-north-1.amazonaws.com/photo-app-templates-697863031884-eu-north-1/latest/6bc5c89856b5b383427d0648b3840c94.template
+      TimeoutInMinutes: 45
+      Parameters:
+        ProjectName:
+          Ref: ProjectName
+        DataSubnetIds:
+          Fn::GetAtt:
+          - VpcStack
+          - Outputs.PrivateDataSubnets
+        RdsSecurityGroupId:
+          Fn::GetAtt:
+          - SecurityStack
+          - Outputs.RdsSecurityGroupId
+        DbName:
+          Ref: DbName
+        DbInstanceClass:
+          Ref: DbInstanceClass
+        DbEngineVersion:
+          Ref: DbEngineVersion
+        DbMultiAZ:
+          Ref: DbMultiAZ
+  IamStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: 
+        https://s3.eu-north-1.amazonaws.com/photo-app-templates-697863031884-eu-north-1/latest/a39b87ea7e67262e2bd4bbd04b340acf.template
+      TimeoutInMinutes: 15
+      Parameters:
+        ProjectName:
+          Ref: ProjectName
+        EcrRepositoryArn:
+          Fn::GetAtt:
+          - EcrStack
+          - Outputs.RepositoryArn
+        GitHubOrg:
+          Ref: GitHubOrg
+        GitHubAppRepo:
+          Ref: GitHubAppRepo
+        GitHubBranch:
+          Ref: GitHubBranch
+        ArtifactBucketName:
+          Fn::Sub: ${ProjectName}-artifacts-${AWS::AccountId}-${AWS::Region}
+        PipelineName:
+          Fn::Sub: ${ProjectName}-pipeline
+        MediaBucketArn:
+          Fn::GetAtt:
+          - S3CloudFrontStack
+          - Outputs.MediaBucketArn
+        DbSecretArn:
+          Fn::GetAtt:
+          - RdsStack
+          - Outputs.DbSecretArn
+        ConnectionArn:
+          Ref: ConnectionArn
+  EcsStack:
+    Condition: DeployApplication
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: 
+        https://s3.eu-north-1.amazonaws.com/photo-app-templates-697863031884-eu-north-1/latest/ce19cff26c96d7c10e1cc426b00c4770.template
+      TimeoutInMinutes: 30
+      Parameters:
+        ProjectName:
+          Ref: ProjectName
+        AlertTopicArn:
+          Fn::GetAtt:
+          - AlertsStack
+          - Outputs.TopicArn
+        AppSubnetIds:
+          Fn::GetAtt:
+          - VpcStack
+          - Outputs.PrivateAppSubnets
+        EcsSecurityGroupId:
+          Fn::GetAtt:
+          - SecurityStack
+          - Outputs.EcsSecurityGroupId
+        MediaBucketName:
+          Fn::GetAtt:
+          - S3CloudFrontStack
+          - Outputs.MediaBucketName
+        CloudFrontDomain:
+          Fn::GetAtt:
+          - S3CloudFrontStack
+          - Outputs.CloudFrontDomain
+        DbSecretArn:
+          Fn::GetAtt:
+          - RdsStack
+          - Outputs.DbSecretArn
+        TaskExecutionRoleArn:
+          Fn::GetAtt:
+          - IamStack
+          - Outputs.TaskExecutionRoleArn
+        TaskRoleArn:
+          Fn::GetAtt:
+          - IamStack
+          - Outputs.TaskRoleArn
+        CodeDeployRoleArn:
+          Fn::GetAtt:
+          - IamStack
+          - Outputs.CodeDeployRoleArn
+        VpcId:
+          Fn::GetAtt:
+          - VpcStack
+          - Outputs.VpcId
+        PublicSubnetIds:
+          Fn::GetAtt:
+          - VpcStack
+          - Outputs.PublicSubnets
+        AlbSecurityGroupId:
+          Fn::GetAtt:
+          - SecurityStack
+          - Outputs.AlbSecurityGroupId
+        ImageUri:
+          Fn::Sub:
+          - ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${Repo}:${Tag}
+          - Repo:
+              Fn::GetAtt:
+              - EcrStack
+              - Outputs.RepositoryName
+            Tag:
+              Ref: TriggerImageTag
+        ContainerPort:
+          Ref: ContainerPort
+        TaskCpu:
+          Ref: TaskCpu
+        TaskMemory:
+          Ref: TaskMemory
+        MinCapacity:
+          Ref: MinCapacity
+        MaxCapacity:
+          Ref: MaxCapacity
+        CpuTargetPercent:
+          Ref: CpuTargetPercent
+  CodeDeployStack:
+    Condition: DeployApplication
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: 
+        https://s3.eu-north-1.amazonaws.com/photo-app-templates-697863031884-eu-north-1/latest/5e1e78eb72221417c0b7b604e2a64de6.template
+      TimeoutInMinutes: 15
+      Parameters:
+        ProjectName:
+          Ref: ProjectName
+        AlertTopicArn:
+          Fn::GetAtt:
+          - AlertsStack
+          - Outputs.TopicArn
+        CodeDeployRoleArn:
+          Fn::GetAtt:
+          - IamStack
+          - Outputs.CodeDeployRoleArn
+        ClusterName:
+          Fn::GetAtt:
+          - EcsStack
+          - Outputs.ClusterName
+        ServiceName:
+          Fn::GetAtt:
+          - EcsStack
+          - Outputs.ServiceName
+        TargetGroupBlueName:
+          Fn::GetAtt:
+          - EcsStack
+          - Outputs.TargetGroupBlueName
+        TargetGroupGreenName:
+          Fn::GetAtt:
+          - EcsStack
+          - Outputs.TargetGroupGreenName
+        ListenerArn:
+          Fn::GetAtt:
+          - EcsStack
+          - Outputs.ListenerArn
+        LoadBalancerFullName:
+          Fn::GetAtt:
+          - EcsStack
+          - Outputs.LoadBalancerFullName
+  CodePipelineStack:
+    Condition: DeployApplication
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: 
+        https://s3.eu-north-1.amazonaws.com/photo-app-templates-697863031884-eu-north-1/latest/9c6a52fb20e8243922adf78d1f70cdf3.template
+      TimeoutInMinutes: 20
+      Parameters:
+        ProjectName:
+          Ref: ProjectName
+        ArtifactBucketName:
+          Fn::Sub: ${ProjectName}-artifacts-${AWS::AccountId}-${AWS::Region}
+        PipelineName:
+          Fn::Sub: ${ProjectName}-pipeline
+        AlertTopicArn:
+          Fn::GetAtt:
+          - AlertsStack
+          - Outputs.TopicArn
+        ConnectionArn:
+          Ref: ConnectionArn
+        GitHubOrg:
+          Ref: GitHubOrg
+        GitHubAppRepo:
+          Ref: GitHubAppRepo
+        GitHubBranch:
+          Ref: GitHubBranch
+        PipelineRoleArn:
+          Fn::GetAtt:
+          - IamStack
+          - Outputs.PipelineRoleArn
+        EventBridgeRoleArn:
+          Fn::GetAtt:
+          - IamStack
+          - Outputs.EventBridgeRoleArn
+        EcrRepositoryName:
+          Fn::GetAtt:
+          - EcrStack
+          - Outputs.RepositoryName
+        TriggerImageTag:
+          Ref: TriggerImageTag
+        CodeDeployApplicationName:
+          Fn::GetAtt:
+          - CodeDeployStack
+          - Outputs.ApplicationName
+        CodeDeployDeploymentGroupName:
+          Fn::GetAtt:
+          - CodeDeployStack
+          - Outputs.DeploymentGroupName
+  CloudWatchStack:
+    Condition: DeployApplication
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: 
+        https://s3.eu-north-1.amazonaws.com/photo-app-templates-697863031884-eu-north-1/latest/4c3dbd886c0f4e038a58bbcde94a489c.template
+      TimeoutInMinutes: 15
+      Parameters:
+        ProjectName:
+          Ref: ProjectName
+        AlertTopicArn:
+          Fn::GetAtt:
+          - AlertsStack
+          - Outputs.TopicArn
+        DbInstanceIdentifier:
+          Fn::GetAtt:
+          - RdsStack
+          - Outputs.DbInstanceIdentifier
+        LoadBalancerFullName:
+          Fn::GetAtt:
+          - EcsStack
+          - Outputs.LoadBalancerFullName
+        TargetGroupBlueFullName:
+          Fn::GetAtt:
+          - EcsStack
+          - Outputs.TargetGroupBlueFullName
+        ClusterName:
+          Fn::GetAtt:
+          - EcsStack
+          - Outputs.ClusterName
+        ServiceName:
+          Fn::GetAtt:
+          - EcsStack
+          - Outputs.ServiceName
+        MaxCapacity:
+          Ref: MaxCapacity
+Outputs:
+  ApplicationUrl:
+    Condition: DeployApplication
+    Description: Public application endpoint
+    Value:
+      Fn::Sub:
+      - http://${Dns}
+      - Dns:
+          Fn::GetAtt:
+          - EcsStack
+          - Outputs.DnsName
+  CloudFrontDomain:
+    Value:
+      Fn::GetAtt:
+      - S3CloudFrontStack
+      - Outputs.CloudFrontDomain
+  ClusterName:
+    Condition: DeployApplication
+    Value:
+      Fn::GetAtt:
+      - EcsStack
+      - Outputs.ClusterName
+  ServiceName:
+    Condition: DeployApplication
+    Value:
+      Fn::GetAtt:
+      - EcsStack
+      - Outputs.ServiceName
+  PipelineName:
+    Condition: DeployApplication
+    Value:
+      Fn::GetAtt:
+      - CodePipelineStack
+      - Outputs.PipelineName
