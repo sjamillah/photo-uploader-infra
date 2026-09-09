@@ -12,7 +12,7 @@ infrastructure identifiers is normal.
 
 | What | URL |
 |---|---|
-| Application (ALB) | `http://photo-app-alb-XXXXXXXX.eu-west-1.elb.amazonaws.com` |
+| Application (ALB) | `http://photo-app-alb-XXXXXXXX.<region>.elb.amazonaws.com` |
 | Images | `https://dXXXXXXXXXXXXX.cloudfront.net/photos/...` |
 
 ## Stack layout
@@ -110,7 +110,7 @@ resolves the image URI from Parameter Store.
 
 ```bash
 aws cloudformation deploy \
-  --region eu-west-1 \
+  --region "$AWS_REGION" \
   --stack-name photo-app-bootstrap \
   --template-file bootstrap.yaml \
   --capabilities CAPABILITY_NAMED_IAM \
@@ -136,9 +136,9 @@ Actions.
 |---|---|---|
 | infra | `AWS_ROLE_ARN` | `GitHubInfraRoleArn` |
 | infra | `TEMPLATE_BUCKET` | `TemplateBucketName` |
-| infra | `AWS_REGION` | `eu-west-1` |
+| infra | `AWS_REGION` | the region everything is deployed into |
 | app | `AWS_ROLE_ARN` | `GitHubAppRoleArn` |
-| app | `AWS_REGION` | `eu-west-1` |
+| app | `AWS_REGION` | the same region as the infra repo |
 | app | `ECR_REPOSITORY` | `photo-app` |
 
 None of them is a credential on its own. A role ARN grants nothing without a
@@ -156,13 +156,16 @@ which is the one step in this build with no API.
 the connection ARN only exists once a person has authorised it, and the prefix
 list id is assigned by AWS per region with no resource that returns it.
 
+The connection must be in the same region as the stack. CodeConnections is
+regional and CodePipeline will not accept one from elsewhere.
+
 ```bash
 aws ssm put-parameter --name /photo-app/connection-arn --type String \
   --overwrite --value "<the ARN from Developer Tools, Connections>"
 
 aws ssm put-parameter --name /photo-app/s3-prefix-list-id --type String \
   --overwrite --value "$(aws ec2 describe-managed-prefix-lists \
-    --filters Name=prefix-list-name,Values=com.amazonaws.eu-west-1.s3 \
+    --filters Name=prefix-list-name,Values="com.amazonaws.$AWS_REGION.s3" \
     --query 'PrefixLists[0].PrefixListId' --output text)"
 ```
 
