@@ -6,7 +6,6 @@ parameters:
   ProjectName: photo-app
   GitHubOrg: sjamillah
   GitHubInfraRepo: photo-uploader-infra
-  GitHubAppRepo: photo-uploader-app
   GitHubBranch: main
   # false when the account already has the provider. It is account-global.
   CreateOidcProvider: 'false'
