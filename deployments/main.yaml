@@ -13,7 +13,7 @@ parameters:
 
   # false on the first pass: network, roles, media, database and the registry
   # only. Push an image, flip this to true, push again.
-  DeployApplication: 'false'
+  DeployApplication: 'true'
 
   GitHubOrg: sjamillah
 

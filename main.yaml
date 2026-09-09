@@ -338,6 +338,13 @@ Resources:
         MaxCapacity: !Ref MaxCapacity
 
 Outputs:
+
+  # Goes in the app repository's AWS_ROLE_ARN secret. Not conditional: it is
+  # needed on the first pass, before there is an image to deploy.
+  GitHubAppRoleArn:
+    Description: Role GitHub Actions in the app repository assumes
+    Value: !GetAtt IamStack.Outputs.GitHubAppRoleArn
+
   ApplicationUrl:
     Condition: DeployApplication
     Description: Public application endpoint
