@@ -35,13 +35,13 @@ jobs:
   package:
     name: Package
     needs: check
-    if: github.event_name != 'pull_request'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    # Read only. Nothing is generated here and nothing is written back:
-    # main.packaged.yaml is committed by whoever changed the templates.
+    # contents: write because the packaged template is committed back. Git sync
+    # deploys that commit, not the one you pushed.
     permissions:
       id-token: write
-      contents: read
+      contents: write
     steps:
       - uses: actions/checkout@v7
 
@@ -51,8 +51,20 @@ jobs:
           role-session-name: ci-${{ github.run_id }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      # Uploads the children and rewrites the paths in main.yaml, then proves
-      # the committed main.packaged.yaml already says the same thing. Package
+      # Uploads the children and rewrites their paths into bucket URLs. Package
       # keys objects by content, so an unchanged template uploads nothing.
-      - name: Package and prove it is in step
-        run: make check
+      - run: make package
+
+      # Only when something moved. A push made with GITHUB_TOKEN starts no
+      # workflow, so this cannot loop.
+      - name: Commit the packaged template
+        run: |
+          if git diff --quiet -- main.packaged.yaml; then
+            echo "nothing to repackage"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add main.packaged.yaml
+          git commit -m "repackage for ${GITHUB_SHA::7}"
+          git push
