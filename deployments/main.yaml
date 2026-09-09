@@ -7,14 +7,13 @@ template-file-path: main.packaged.yaml
 parameters:
   ProjectName: photo-app
 
-
   # Where alarms are delivered. AWS emails a confirmation link that has to be
   # clicked before anything arrives.
   AlertEmail: 'j.ssozi@alustudent.com'
 
   # false on the first pass: network, roles, media, database and the registry
   # only. Push an image, flip this to true, push again.
-  DeployApplication: 'true'
+  DeployApplication: 'false'
 
   GitHubOrg: sjamillah
 
