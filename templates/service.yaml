@@ -2,10 +2,10 @@ AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::LanguageExtensions
 Description: >-
   photo-uploader application tier - load balancer, target group pair,
-  listeners, ECS cluster, task, service, auto scaling, CodeDeploy
+  listeners, ECS cluster, task definition, service, auto scaling
 
-# The two alarms at the bottom live here because the deployment group blocks
-# on them. Anything that only notifies a human is in monitoring.yaml.
+# The blue/green wiring and the alarms that gate a cutover are in
+# codedeploy.yaml; the alarms that only notify are in monitoring.yaml.
 
 Parameters:
   ProjectName: { Type: String }
