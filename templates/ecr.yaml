@@ -56,5 +56,3 @@ Outputs:
   RepositoryName:
     Value: !Ref Repository
 
-  RepositoryUri:
-    Value: !GetAtt Repository.RepositoryUri

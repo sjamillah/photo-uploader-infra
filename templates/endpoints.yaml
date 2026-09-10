@@ -16,7 +16,6 @@ Mappings:
     SsmMessages: { Service: ssmmessages }
 
 Parameters:
-  ProjectName: { Type: String }
   VpcId: { Type: AWS::EC2::VPC::Id }
   AppSubnetIds: { Type: List<AWS::EC2::Subnet::Id> }
   RouteTableIds: { Type: CommaDelimitedList }

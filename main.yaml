@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: photo-uploader main stack - composes the eight templates in templates/
+Description: photo-uploader main stack - composes the twelve templates in templates/
 
 # Order comes from the !GetAtt references between the children; values flow
 # down as parameters, so none of them uses Fn::ImportValue.
@@ -179,7 +179,6 @@ Resources:
         PublicTierCidr: !Ref PublicTierCidr
         AppTierCidr: !Ref AppTierCidr
         DataTierCidr: !Ref DataTierCidr
-        S3PrefixListId: !Ref S3PrefixListId
 
   # Read on its own: this is the file to check least privilege in.
   SecurityStack:
@@ -191,6 +190,7 @@ Resources:
         ProjectName: !Ref ProjectName
         VpcId: !GetAtt VpcStack.Outputs.VpcId
         S3PrefixListId: !Ref S3PrefixListId
+        ContainerPort: !Ref ContainerPort
 
   # What replaces a NAT gateway.
   EndpointsStack:
@@ -199,7 +199,6 @@ Resources:
       TemplateURL: templates/endpoints.yaml
       TimeoutInMinutes: 20
       Parameters:
-        ProjectName: !Ref ProjectName
         VpcId: !GetAtt VpcStack.Outputs.VpcId
         AppSubnetIds: !GetAtt VpcStack.Outputs.PrivateAppSubnets
         RouteTableIds: !GetAtt VpcStack.Outputs.PrivateRouteTables
@@ -255,7 +254,6 @@ Resources:
       TimeoutInMinutes: 30
       Parameters:
         ProjectName: !Ref ProjectName
-        AlertTopicArn: !GetAtt AlertsStack.Outputs.TopicArn
         AppSubnetIds: !GetAtt VpcStack.Outputs.PrivateAppSubnets
         EcsSecurityGroupId: !GetAtt SecurityStack.Outputs.EcsSecurityGroupId
         MediaBucketName: !GetAtt S3CloudFrontStack.Outputs.MediaBucketName
@@ -263,7 +261,6 @@ Resources:
         DbSecretArn: !GetAtt RdsStack.Outputs.DbSecretArn
         TaskExecutionRoleArn: !GetAtt IamStack.Outputs.TaskExecutionRoleArn
         TaskRoleArn: !GetAtt IamStack.Outputs.TaskRoleArn
-        CodeDeployRoleArn: !GetAtt IamStack.Outputs.CodeDeployRoleArn
         VpcId: !GetAtt VpcStack.Outputs.VpcId
         PublicSubnetIds: !GetAtt VpcStack.Outputs.PublicSubnets
         AlbSecurityGroupId: !GetAtt SecurityStack.Outputs.AlbSecurityGroupId

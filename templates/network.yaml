@@ -1,6 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Transform: AWS::LanguageExtensions
-Description: photo-uploader VPC - subnets, routing, endpoints, security groups
+Description: photo-uploader VPC - subnets, routing, and nothing else
 
 
 Parameters:
@@ -22,9 +21,6 @@ Parameters:
     Type: String
     Description: Split into two /27 subnets, one per AZ.
 
-  S3PrefixListId:
-    Type: String
-    AllowedPattern: '^pl-[0-9a-f]+$'
 Resources:
 
   # --- VPC and internet gateway ---------------------------------------------

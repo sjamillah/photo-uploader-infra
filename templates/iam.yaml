@@ -231,8 +231,8 @@ Resources:
                   # The workflow writes back the digest it just pushed, so Parameter Store
                   # holds an immutable reference rather than a movable tag.
                   - 'ecr:DescribeImages'
-                # The repository is templates/ecr.yaml now, so its ARN is built
-                # from the name rather than referenced.
+                # Passed down from ecr.yaml's output, so this role cannot be
+                # created before the repository it is scoped to.
                 Resource: !Ref EcrRepositoryArn
               - Sid: RecordTheDeployedImage
                 Effect: Allow

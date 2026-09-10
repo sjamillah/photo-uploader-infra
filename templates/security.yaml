@@ -8,6 +8,10 @@ Parameters:
   ProjectName: { Type: String }
   VpcId: { Type: AWS::EC2::VPC::Id }
 
+  # The same value service.yaml gives the target groups and the container, so
+  # the rules cannot be left behind when the port changes.
+  ContainerPort: { Type: Number }
+
   S3PrefixListId:
     Type: String
     Description: >-
@@ -78,8 +82,8 @@ Resources:
     Properties:
       GroupId: !Ref AlbSecurityGroup
       IpProtocol: tcp
-      FromPort: 8080
-      ToPort: 8080
+      FromPort: !Ref ContainerPort
+      ToPort: !Ref ContainerPort
       DestinationSecurityGroupId: !Ref EcsSecurityGroup
       Description: Traffic to the containers
 
@@ -90,8 +94,8 @@ Resources:
     Properties:
       GroupId: !Ref EcsSecurityGroup
       IpProtocol: tcp
-      FromPort: 8080
-      ToPort: 8080
+      FromPort: !Ref ContainerPort
+      ToPort: !Ref ContainerPort
       SourceSecurityGroupId: !Ref AlbSecurityGroup
       Description: Gunicorn
 

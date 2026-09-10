@@ -10,8 +10,6 @@ Description: >-
 Parameters:
   ProjectName: { Type: String }
 
-  AlertTopicArn: { Type: String }
-
   AppSubnetIds: { Type: List<AWS::EC2::Subnet::Id> }
 
   EcsSecurityGroupId: { Type: AWS::EC2::SecurityGroup::Id }
@@ -26,8 +24,6 @@ Parameters:
 
   TaskRoleArn: { Type: String }
 
-  CodeDeployRoleArn: { Type: String }
-
   VpcId: { Type: AWS::EC2::VPC::Id }
 
   PublicSubnetIds: { Type: List<AWS::EC2::Subnet::Id> }
@@ -36,7 +32,9 @@ Parameters:
 
   ImageUri:
     Type: String
-    Description: Full image URI including the digest.
+    Description: >-
+      Repository and tag, never a digest. A CODE_DEPLOY service rejects any
+      CloudFormation change to its task definition, so this must never move.
 
   ContainerPort: { Type: Number }
 
