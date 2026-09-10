@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: photo-uploader main stack - composes the eight templates in 
+Description: photo-uploader main stack - composes the twelve templates in 
   templates/
 Metadata:
   cfn-lint:
@@ -144,7 +144,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: 
-        https://s3.eu-north-1.amazonaws.com/photo-app-templates-697863031884-eu-north-1/latest/f160209d40216c7db5a1a676c32618ff.template
+        https://s3.eu-north-1.amazonaws.com/photo-app-templates-697863031884-eu-north-1/latest/04d384ea145ae17c3f8c1660581a0d31.template
       TimeoutInMinutes: 15
       Parameters:
         ProjectName:
@@ -164,7 +164,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: 
-        https://s3.eu-north-1.amazonaws.com/photo-app-templates-697863031884-eu-north-1/latest/b1f7040ac12fd6bcd6dd1a2c998f6e45.template
+        https://s3.eu-north-1.amazonaws.com/photo-app-templates-697863031884-eu-north-1/latest/3aa28b14935b546e1b1140c007168da6.template
       TimeoutInMinutes: 20
       Parameters:
         ProjectName:
@@ -177,13 +177,11 @@ Resources:
           Ref: AppTierCidr
         DataTierCidr:
           Ref: DataTierCidr
-        S3PrefixListId:
-          Ref: S3PrefixListId
   SecurityStack:
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: 
-        https://s3.eu-north-1.amazonaws.com/photo-app-templates-697863031884-eu-north-1/latest/8df0f1f9d1d8f4183bf49d7713059062.template
+        https://s3.eu-north-1.amazonaws.com/photo-app-templates-697863031884-eu-north-1/latest/ccd063df7d8356353e4d8c14dcc330cd.template
       TimeoutInMinutes: 15
       Parameters:
         ProjectName:
@@ -194,15 +192,15 @@ Resources:
           - Outputs.VpcId
         S3PrefixListId:
           Ref: S3PrefixListId
+        ContainerPort:
+          Ref: ContainerPort
   EndpointsStack:
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: 
-        https://s3.eu-north-1.amazonaws.com/photo-app-templates-697863031884-eu-north-1/latest/05b4321f377e24634906d9d685487dd3.template
+        https://s3.eu-north-1.amazonaws.com/photo-app-templates-697863031884-eu-north-1/latest/6baf342bb1f2bc1aedb994227687e215.template
       TimeoutInMinutes: 20
       Parameters:
-        ProjectName:
-          Ref: ProjectName
         VpcId:
           Fn::GetAtt:
           - VpcStack
@@ -291,15 +289,11 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: 
-        https://s3.eu-north-1.amazonaws.com/photo-app-templates-697863031884-eu-north-1/latest/eb7be4aaa5c583cf453fc2025426d315.template
+        https://s3.eu-north-1.amazonaws.com/photo-app-templates-697863031884-eu-north-1/latest/7aee2118a7cef79d770acf1f1fba6706.template
       TimeoutInMinutes: 30
       Parameters:
         ProjectName:
           Ref: ProjectName
-        AlertTopicArn:
-          Fn::GetAtt:
-          - AlertsStack
-          - Outputs.TopicArn
         AppSubnetIds:
           Fn::GetAtt:
           - VpcStack
@@ -328,10 +322,6 @@ Resources:
           Fn::GetAtt:
           - IamStack
           - Outputs.TaskRoleArn
-        CodeDeployRoleArn:
-          Fn::GetAtt:
-          - IamStack
-          - Outputs.CodeDeployRoleArn
         VpcId:
           Fn::GetAtt:
           - VpcStack
