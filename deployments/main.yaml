@@ -1,21 +1,18 @@
-# Git sync has no packaging step, so it deploys the packaged file that
-# `make package` writes from main.yaml.
+# Git sync deploys the packaged file make package writes. Only the connection
+# ARN and the S3 prefix list id come from Parameter Store; they have no
+# CloudFormation source.
 template-file-path: main.packaged.yaml
 
-# Only what main.yaml cannot work out for itself. Anything account-specific
-# is read from Parameter Store by the template, so it never lands in git.
 parameters:
-  ProjectName: photo-app
-
-  # Where alarms are delivered. AWS emails a confirmation link that has to be
-  # clicked before anything arrives.
-  AlertEmail: 'j.ssozi@alustudent.com'
-
-  # false on the first pass: network, roles, media, database and the registry
-  # only. Push an image, flip this to true, push again.
-  DeployApplication: 'true'
+  # false on the first pass: the service cannot start before CI has pushed an
+  # image. Flip to true and push; that commit is the trigger.
+  DeployApplication: 'false'
 
   GitHubOrg: sjamillah
+
+  # AWS emails a confirmation link that has to be clicked before anything
+  # arrives. Changing it here replaces the subscription.
+  AlertEmail: 'j.ssozi@alustudent.com'
 
 tags:
   Project: photo-uploader

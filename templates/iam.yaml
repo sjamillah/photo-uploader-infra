@@ -1,30 +1,35 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: photo-uploader IAM - every role except the ones needed before this stack exists
 
-# Every role except the three bootstrap.yaml creates, which Git sync and CI
-# both need before anything is deployed.
-
 Parameters:
-  ProjectName: { Type: String }
+  ProjectName:
+    Type: String
 
-  # Defined once in main.yaml and handed to both stacks, because the roles
-  # are created before the resources they grant access to.
-  ArtifactBucketName: { Type: String }
-  EcrRepositoryArn: { Type: String }
-  GitHubOrg: { Type: String }
-  GitHubAppRepo: { Type: String }
-  GitHubBranch: { Type: String }
-  PipelineName: { Type: String }
-  MediaBucketArn: { Type: String }
-  DbSecretArn: { Type: String }
-  ConnectionArn: { Type: String }
+  # Passed from main.yaml: roles precede the resources they grant access to.
+  ArtifactBucketName:
+    Type: String
+  EcrRepositoryArn:
+    Type: String
+  GitHubOrg:
+    Type: String
+  GitHubAppRepo:
+    Type: String
+  GitHubBranch:
+    Type: String
+  PipelineName:
+    Type: String
+  MediaBucketArn:
+    Type: String
+  DbSecretArn:
+    Type: String
+  ConnectionArn:
+    Type: String
 
 Resources:
 
   # --- ECS ------------------------------------------------------------------
 
-  # The ECS agent, before the application starts: pull the image, fetch the
-  # secret, create the log stream.
+  # The agent, before the application starts: image, secret, log stream.
   TaskExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -47,8 +52,7 @@ Resources:
                 Action: 'secretsmanager:GetSecretValue'
                 Resource: !Ref DbSecretArn
 
-  # The application itself. Separate from the execution role so application
-  # code can never pull images or read secrets it was not injected with.
+  # Separate from the execution role: app code cannot pull images or read secrets.
   TaskRole:
     Type: AWS::IAM::Role
     Properties:
@@ -77,8 +81,7 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              # Needed for `aws ecs execute-command`, which is the fastest way
-              # to diagnose a task that cannot reach the database.
+              # For `aws ecs execute-command`, the fastest way into a stuck task.
               - Effect: Allow
                 Action:
                   - 'ssmmessages:CreateControlChannel'
@@ -204,8 +207,7 @@ Resources:
               StringEquals:
                 'token.actions.githubusercontent.com:aud': sts.amazonaws.com
               StringLike:
-                # GitHub appends numeric ids so the claim survives a rename.
-                # Both shapes accepted; the literal @ anchors the wildcard.
+                # GitHub appends numeric ids on rename; the literal @ anchors it.
                 'token.actions.githubusercontent.com:sub':
                   - !Sub 'repo:${GitHubOrg}/${GitHubAppRepo}:ref:refs/heads/${GitHubBranch}'
                   - !Sub 'repo:${GitHubOrg}@*/${GitHubAppRepo}@*:ref:refs/heads/${GitHubBranch}'
@@ -228,18 +230,8 @@ Resources:
                   - 'ecr:PutImage'
                   - 'ecr:BatchGetImage'
                   - 'ecr:GetDownloadUrlForLayer'
-                  # The workflow writes back the digest it just pushed, so Parameter Store
-                  # holds an immutable reference rather than a movable tag.
-                  - 'ecr:DescribeImages'
-                # Passed down from ecr.yaml's output, so this role cannot be
-                # created before the repository it is scoped to.
+                # From ecr.yaml's output, so this cannot precede the repository.
                 Resource: !Ref EcrRepositoryArn
-              - Sid: RecordTheDeployedImage
-                Effect: Allow
-                Action:
-                  - 'ssm:PutParameter'
-                  - 'ssm:GetParameter'
-                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/image/*'
 
 Outputs:
   GitHubAppRoleArn:

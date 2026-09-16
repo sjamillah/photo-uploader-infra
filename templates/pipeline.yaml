@@ -2,34 +2,46 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: photo-uploader CodePipeline - EventBridge trigger and CodeDeploy hand-off
 
 Parameters:
-  ProjectName: { Type: String }
+  ProjectName:
+    Type: String
 
-  ArtifactBucketName: { Type: String }
-  PipelineName: { Type: String }
+  ArtifactBucketName:
+    Type: String
 
-  AlertTopicArn: { Type: String }
+  PipelineName:
+    Type: String
+
+  AlertTopicArn:
+    Type: String
 
   ConnectionArn:
     Type: String
     Description: An AVAILABLE CodeConnections connection.
 
-  GitHubOrg: { Type: String }
+  GitHubOrg:
+    Type: String
 
-  GitHubAppRepo: { Type: String }
+  GitHubAppRepo:
+    Type: String
 
   GitHubBranch:
     Type: String
     Description: The branch supplying appspec.yaml and taskdef.json.
 
-  PipelineRoleArn: { Type: String }
+  PipelineRoleArn:
+    Type: String
 
-  EventBridgeRoleArn: { Type: String }
+  EventBridgeRoleArn:
+    Type: String
 
-  EcrRepositoryName: { Type: String }
+  EcrRepositoryName:
+    Type: String
 
-  TriggerImageTag: { Type: String }
+  TriggerImageTag:
+    Type: String
 
-  CodeDeployApplicationName: { Type: String }
+  CodeDeployApplicationName:
+    Type: String
 
   CodeDeployDeploymentGroupName:
     Type: String
@@ -40,6 +52,7 @@ Resources:
 
   ArtifactBucket:
     Type: AWS::S3::Bucket
+    # Delete, not Retain: nothing here is precious. make empty clears it first.
     DeletionPolicy: Delete
     Properties:
       BucketName: !Ref ArtifactBucketName
@@ -52,10 +65,10 @@ Resources:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
+            BucketKeyEnabled: true
       LifecycleConfiguration:
         Rules:
-          # Artifacts are disposable, and without this the bucket grows by a
-          # couple of megabytes per deployment forever.
+          # Without this the bucket grows a couple of megabytes per deployment.
           - Id: expire-artifacts
             Status: Enabled
             ExpirationInDays: 30
@@ -63,6 +76,25 @@ Resources:
             Status: Enabled
             AbortIncompleteMultipartUpload:
               DaysAfterInitiation: 7
+
+  # The other two buckets refuse plaintext requests; this one should too.
+  ArtifactBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt ArtifactBucket.Arn
+              - !Sub '${ArtifactBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
 
   # --- Pipeline -------------------------------------------------------------
 
@@ -79,8 +111,7 @@ Resources:
       Stages:
         - Name: Source
           Actions:
-            # Produces imageDetail.json, which carries the image URI including
-            # its digest. That digest is what actually gets deployed.
+            # Produces imageDetail.json, carrying the digest that gets deployed.
             - Name: Image
               RunOrder: 1
               ActionTypeId:
@@ -105,8 +136,7 @@ Resources:
                 ConnectionArn: !Ref ConnectionArn
                 FullRepositoryId: !Sub '${GitHubOrg}/${GitHubAppRepo}'
                 BranchName: !Ref GitHubBranch
-                # Only the image push starts a deployment; otherwise a README
-                # edit would trigger a release.
+                # Only an image push starts a deployment, not a README edit.
                 DetectChanges: false
               OutputArtifacts:
                 - Name: ConfigArtifact
@@ -129,8 +159,7 @@ Resources:
                 TaskDefinitionTemplatePath: deploy/taskdef.json
                 AppSpecTemplateArtifact: ConfigArtifact
                 AppSpecTemplatePath: deploy/appspec.yaml
-                # Substitutes the digest from imageDetail.json into the
-                # IMAGE1_NAME placeholder in taskdef.json.
+                # Substitutes the digest into IMAGE1_NAME in taskdef.json.
                 Image1ArtifactName: ImageArtifact
                 Image1ContainerName: IMAGE1_NAME
 
@@ -154,8 +183,7 @@ Resources:
             - SUCCESS
           repository-name:
             - !Ref EcrRepositoryName
-          # The build pushes both :sha and :latest, which emits two events.
-          # This filter makes exactly one of them start a pipeline.
+          # :latest is the only tag, so this matches the one event a build emits.
           image-tag:
             - !Ref TriggerImageTag
       Targets:

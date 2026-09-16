@@ -25,7 +25,7 @@ Two stacks you deploy; twelve CloudFormation creates for you.
 | `photo-app-main` | Git sync from `deployments/main.yaml` | twelve nested children |
 
 Both are Git-synced. Bootstrap has to be *created* by hand, because it is what
-creates the roles Git sync assumes, but once it exists Git sync adopts it and
+creates the roles everything else assumes, but once it exists Git sync adopts it and
 every later change comes from the repository.
 
 Bootstrap holds only what must exist before anything else can run: those roles,
@@ -46,8 +46,8 @@ Templates are named for what they do, not for the service they happen to use.
 |---|---|
 | `bootstrap.yaml` | Deployed by hand: the three roles Git sync needs, the OIDC provider, the staging bucket |
 | `main.yaml` | The parent, referencing the twelve templates below by path |
-| `main.packaged.yaml` | What Git sync deploys. Written by CI, never edited by hand |
-| `Makefile` | `make package` and `make lint`, both of which CI runs |
+| `main.packaged.yaml` | What Git sync deploys. Written by `make package`, committed with the change |
+| `Makefile` | `make tools` once, `make package` before a push, `make verify` in CI, `make empty` for teardown |
 | `templates/ecr.yaml` | The container registry, built on the first pass |
 | `templates/alerts.yaml` | The SNS topic every alarm and the pipeline publish to |
 | `templates/network.yaml` | VPC, subnets, routing |
@@ -64,18 +64,17 @@ Templates are named for what they do, not for the service they happen to use.
 ### Changing a template
 
 `main.yaml` references its children by path. CloudFormation only accepts an S3
-URL for a nested `TemplateURL` and Git sync has no packaging step, so CI does it:
+URL for a nested `TemplateURL` and Git sync has no packaging step, so you run it
+before the push:
 
 ```bash
-git add -A && git commit -m "split security out of network" && git push
+git add -A && git commit -m "..." && git push
 ```
 
-That is the whole flow. The workflow lints, runs `make package`, and commits
-`main.packaged.yaml` back if it moved. Git sync deploys **that** commit.
-
-Nothing deploys until cfn-lint passes, because the packaged file is what Git
-sync reads and CI only writes it after linting. A broken template makes your
-push a no-op rather than a failed stack update.
+That is the whole flow. One CI job lints, packages the children into S3, and
+deploys `photo-app-main` with the parameters and tags in `deployments/main.yaml`.
+Nothing is committed back, so there is no second workflow run and no generated
+file in the repository.
 
 `make package` locally is only for seeing the rewritten URLs before you push.
 
@@ -129,14 +128,14 @@ Values flow down as stack parameters, so the twelve children contain no
 
 ## Getting it running
 
-Eleven steps, and the order is load-bearing. The service cannot start before an
-image exists in the registry, and the registry is created by the same stack that
-would run the service — so the stack is deployed twice, with a parameter
-deciding whether the application half is included.
+Both stacks are deployed by Git sync. `photo-app-bootstrap` is one template with no
+children, so Git sync reads it straight from the repository. `photo-app-main` has
+nested children that CloudFormation will only load from S3, so `make package`
+stages them and rewrites the paths into `main.packaged.yaml`, which you commit.
 
-**1. Create bootstrap by hand.** Console, CloudFormation, Create stack, Upload a
-template file, `bootstrap.yaml`. Stack name `photo-app-bootstrap`. It has to be
-by hand because it creates the roles Git sync will later ask you for.
+**1. Create bootstrap by hand.** Console, CloudFormation, Upload a template
+file, `bootstrap.yaml`, stack name `photo-app-bootstrap`. By hand because it creates
+the roles Git sync will ask you for in step 5.
 
 | Parameter | Value |
 |---|---|
@@ -146,42 +145,58 @@ by hand because it creates the roles Git sync will later ask you for.
 | GitHubBranch | `main` |
 | CreateOidcProvider | `false` if the account already has the GitHub provider |
 
-Tick the IAM acknowledgement. Keep the Outputs tab: you need
-`GitHubInfraRoleArn` and `TemplateBucketName`.
-
-**2. Create the GitHub connection.** Developer Tools, Connections, Create
-connection, GitHub, granting access to both repositories. It is born `PENDING`
-and needs an interactive OAuth handshake to become `AVAILABLE` — the one step
-in this build with no API. It must be in the same region as the stacks, because
-CodeConnections is regional and CodePipeline will not accept one from elsewhere.
-
-**3. Put two values in Parameter Store.** Bootstrap publishes
-`/photo-app/template-bucket` and `/photo-app/template-prefix` itself. These two
-have no CloudFormation source: the connection ARN only exists once a person has
-authorised it, and the prefix list id is assigned by AWS per region with no
-resource that returns it.
+**2. The GitHub connection.** Use the one you already have. It must read
+`AVAILABLE` and cover both repositories:
 
 ```bash
-aws ssm put-parameter --name /photo-app/connection-arn --type String \
-  --overwrite --value "<the ARN from Developer Tools, Connections>"
+aws codeconnections list-connections --region $R \
+  --query "Connections[].[ConnectionName,ConnectionStatus]" --output table
+```
 
-aws ssm put-parameter --name /photo-app/s3-prefix-list-id --type String \
-  --overwrite --value "$(aws ec2 describe-managed-prefix-lists \
-    --filters Name=prefix-list-name,Values="com.amazonaws.$AWS_REGION.s3" \
-    --query 'PrefixLists[0].PrefixListId' --output text)"
+If it does not cover them, add the repositories in Developer Tools, Connections,
+under the connection's GitHub Apps link.
 
-aws ssm get-parameters-by-path --path /photo-app --recursive \
+**3. Fill Parameter Store.** Two values, neither of which any resource returns:
+the connection is authorised outside CloudFormation, and the prefix list id is
+assigned by AWS per region with no lookup function for it.
+
+```bash
+R=eu-north-1
+
+aws ssm put-parameter --region $R --name /photo-app/connection-arn --type String --overwrite \
+  --value "$(aws codeconnections list-connections --region $R \
+     --query "Connections[?ConnectionStatus=='AVAILABLE']|[0].ConnectionArn" --output text)"
+
+aws ssm put-parameter --region $R --name /photo-app/s3-prefix-list-id --type String --overwrite \
+  --value "$(aws ec2 describe-managed-prefix-lists --region $R \
+     --filters Name=prefix-list-name,Values=com.amazonaws.$R.s3 \
+     --query 'PrefixLists[0].PrefixListId' --output text)"
+
+aws ssm get-parameters-by-path --path /photo-app --recursive --region $R \
   --query 'Parameters[].[Name,Value]' --output table
 ```
 
-Four rows, none of them `None`.
+Four rows, none of them `None` — bootstrap wrote the other two.
 
-**4. Set `DeployApplication: 'false'`** in `deployments/main.yaml`, commit and
-push. CI packages and commits `main.packaged.yaml` behind you — wait for that
-bot commit before the next step, because it is the file Git sync deploys.
+`GitHubOrg` and `AlertEmail` are not here: they live in
+`deployments/main.yaml`, where changing one is itself the deploy trigger.
 
-**5. Create the synced stack.** CloudFormation, Create stack, With new
-resources, Sync from Git.
+**4. Set the infra repository secrets, package, then push.** The secrets are what
+CI verifies with; the packaged file is what Git sync deploys in step 5.
+
+| Secret | Source |
+|---|---|
+| `AWS_ROLE_ARN` | `GitHubInfraRoleArn`, from `photo-app-bootstrap` Outputs |
+| `AWS_REGION` | the deployment region |
+
+```bash
+make package
+git add -A && git commit -m "..." && git push
+```
+
+`main.packaged.yaml` does not exist until `make package` writes it.
+
+**5. Create the synced stack.** CloudFormation, Create stack, Sync from Git.
 
 | Field | Value |
 |---|---|
@@ -191,64 +206,47 @@ resources, Sync from Git.
 | Git sync role | `photo-app-gitsync` |
 | Stack operations role | `photo-app-cfn-deployment` |
 
-Choose the existing roles. Do not let the console create new ones. Around
-twenty minutes, most of it RDS.
+Choose the existing roles; do not let the console create new ones. Around twenty minutes, most of it RDS.
 
-**6. Set the repository secrets** from the two stacks' Outputs.
+**6. Set the application repository secrets**, which only exist now that
+`photo-app-main` has been created.
 
-| Repo | Secret | Source |
-|---|---|---|
-| infra | `AWS_ROLE_ARN` | `GitHubInfraRoleArn`, from bootstrap |
-| infra | `AWS_REGION` | the region everything is deployed into |
-| app | `AWS_ROLE_ARN` | `GitHubAppRoleArn`, from `photo-app-main` |
-| app | `AWS_REGION` | the same region |
-| app | `ECR_REPOSITORY` | `photo-app` |
+| Secret | Source |
+|---|---|
+| `AWS_ROLE_ARN` | `GitHubAppRoleArn`, from `photo-app-main` Outputs |
+| `AWS_REGION` | the same region |
+| `ECR_REPOSITORY` | `photo-app` |
 
-None of them is a credential on its own. A role ARN grants nothing without a
-matching OIDC token, and there are no AWS access keys anywhere in either repo.
-They are secrets so that nothing identifying the account is echoed into a public
-build log.
-
-**7. Push the application.** CI builds the image and pushes it to ECR. Do not go
-on until a tag appears:
+**7. Push the application.** CI builds the image and moves `:latest`, the only
+tag and the one the EventBridge rule watches.
 
 ```bash
-aws ecr describe-images --repository-name photo-app \
+aws ecr describe-images --repository-name photo-app --region $R \
   --query 'imageDetails[].imageTags' --output table
 ```
 
 **8. Flip to the second pass.** Set `DeployApplication: 'true'` in
-`deployments/main.yaml`, commit, push. That is a parameter, not a template, so
-no packaging is involved and Git sync deploys it directly. This adds the
-service, CodeDeploy, the pipeline and the notification alarms.
+`deployments/main.yaml`, commit and push. That is a deployment-file change, not
+a template one, so Git sync deploys it directly and no repackaging is needed.
 
-**9. Generate `deploy/taskdef.json`** in the application repo, from the task
-definition CloudFormation just registered. The command is in that repo's README.
-Until this is done the pipeline deploys a task definition pointing at whatever
-was committed last, which after any rebuild is a secret ARN that no longer
-exists.
+**9. Generate `deploy/taskdef.json`** in the application repository. The
+committed one is a stub; the real values only exist now. The command is in that
+repository's README.
 
-**10. Adopt bootstrap into Git sync.** `photo-app-bootstrap`, Stack actions,
-Sync from Git, deployment file `deployments/bootstrap.yaml`, the same two roles.
-It adopts the existing stack rather than creating a second one. Both stacks
-synced is the requirement being marked.
-
-Leave this until last. Adopting it earlier means Git sync deploying changes to
+**10. Adopt bootstrap into Git sync.** `photo-app-bootstrap`, Stack actions, Sync from
+Git, deployment file `deployments/bootstrap.yaml`, the same two roles. Left
+until last because adopting it earlier means Git sync deploying changes to
 `photo-app-gitsync` while it is mid-deploy using that role.
 
-**11. Confirm the SNS subscription.** AWS emails a link when `alerts.yaml`
-creates the subscription. Until it is clicked every alarm fires into nothing:
+**11. Confirm the SNS subscription.** The email went out back at step 5, when
+the alerts child created the subscription, and the link expires after three
+days. Until it is clicked the subscription reads `PendingConfirmation` and all
+eight alarms publish into nothing.
 
 ```bash
-aws sns list-subscriptions \
-  --query "Subscriptions[?contains(TopicArn,'photo-app-alerts')].[Endpoint,SubscriptionArn]" \
-  --output text
+aws sns list-subscriptions --region $R \
+  --query "Subscriptions[?contains(TopicArn,'photo-app-alerts')].[Endpoint,SubscriptionArn]" --output table
 ```
-
-`PendingConfirmation` in the second column means unclicked. Confirmation links
-expire after three days, and a link from a previous build of the topic fails
-with *"Subscription not confirmed"* — resubscribing the same address sends a
-fresh one without creating a duplicate.
 
 ## When something needs a nudge
 
@@ -305,7 +303,7 @@ delete. See Teardown.
 | `photo-app-codedeploy` | CodeDeploy | `AWSCodeDeployRoleForECS`: create task sets and shift target groups |
 | `photo-app-pipeline` | CodePipeline | The artifact bucket; use the GitHub connection; describe ECR images; drive CodeDeploy; register task definitions; pass the two task roles, and only to ECS |
 | `photo-app-eventbridge-pipeline` | EventBridge | Start this one pipeline |
-| `photo-app-gha-app` | GitHub Actions, app repo, `main` only | Push to the `photo-app` ECR repository, and write `/photo-app/image/*` in Parameter Store |
+| `photo-app-gha-app` | GitHub Actions, app repo, `main` only | Push to the `photo-app` ECR repository |
 
 `photo-app-gha-app` lives here rather than in bootstrap because it needs the
 registry's ARN, and the registry is `templates/ecr.yaml`. That is also why
@@ -328,10 +326,8 @@ application code can never read a secret it was not injected with.
 
 ## Repository settings
 
-Settings, Actions, General, Workflow permissions must be **Read and write
-permissions**. The `package` job commits `main.packaged.yaml` back, and a
-job-level `contents: write` cannot grant more than the repository setting
-allows — with the default the push step fails with a 403.
+Nothing to change. The workflow never writes to the repository, so the default
+**Read repository contents** permission is enough.
 
 ## Address plan
 
@@ -386,20 +382,20 @@ health check and go live.
 
 ## CI
 
-One workflow, `ci.yml`, with two jobs:
+One workflow, `ci.yml`, with one job:
 
 | Job | Runs on | Does |
 |---|---|---|
-| `check` | pull requests and pushes | `make lint`, which is cfn-lint over every template |
-| `package` | pushes to `main`, only if `check` passed | `make package`, then commits `main.packaged.yaml` back if it moved |
+| `verify` | pull requests | `make lint` only — no credentials, no S3 |
+| `verify` | pushes to `main` | `make verify` — repackages and fails if `main.packaged.yaml` is stale |
 
-`package` is the only job granted `id-token: write`, and the only one granted
-`contents: write`. A push made with `GITHUB_TOKEN` starts no workflow, so the
-commit it makes cannot loop back into another run.
+One job, so the runner boots once and installs cfn-lint once, at the version
+pinned in the Makefile. It is granted `id-token: write` to assume the CI role
+and nothing else; `contents` stays read-only, because nothing is written back.
 
-The ordering matters more than it looks. `main.packaged.yaml` is what Git sync
-deploys, and CI only writes it after cfn-lint has passed, so a broken template
-turns your push into a no-op rather than a failed stack update.
+Git sync has already deployed by the time this runs. The gate moved to
+`make package`, which lints before it stages anything; CI is the check that what
+you committed was honest.
 
 ## Two loops
 
@@ -436,7 +432,7 @@ goes quietly stale every time a template moves.
 | CloudFront and private S3 with OAC | `media.yaml` | 200 through CloudFront next to 403 direct to S3 |
 | All resources via CloudFormation Git sync | `bootstrap.yaml`, `templates/` | Git sync tab showing a synced commit on **both** stacks; the main stack's Resources tab listing twelve nested children |
 | GitHub Actions builds the image | app `ci.yml` | Green `build` job |
-| Image pushed to ECR | app `ci.yml` | `describe-images` showing the SHA and `latest` tags |
+| Image pushed to ECR | app `ci.yml` | `describe-images` showing the `latest` tag, and an OCI revision label naming the commit |
 | OIDC authentication | `bootstrap.yaml` | The trust policy, and Settings showing no AWS access keys in either repo |
 | EventBridge detects the push | `pipeline.yaml` | The rule's event pattern, and a pipeline execution whose trigger was the event |
 | Application reachable via ALB | `service.yaml` | The URL, serving the gallery |
@@ -490,44 +486,138 @@ templates.
 
 ## Teardown
 
-Unsync both stacks first, or a stray push recreates what you deleted. Empty the
-three buckets. The media bucket is versioned, so empty that one from the console
-rather than with `aws s3 rm`. Delete `photo-app-main`, then
-`photo-app-bootstrap`. Finally delete the RDS snapshot, which
-`DeletionPolicy: Snapshot` leaves behind and which is billed.
+Nothing here deletes itself cleanly, and the reasons are worth knowing rather than
+discovering at 2am.
 
-**Delete the two retained roles last, and only after the stack is gone.**
+Three steps, and only the middle one is automated. CloudFormation cannot empty
+an S3 bucket, and it will not delete one that still holds objects — that gap is
+worth a make target. Deleting the stacks is a decision, so it stays yours.
+
+**1. Unsync both stacks**, or a stray push recreates what you delete.
+Stack actions, Stop sync from Git in the console, or:
+
+```bash
+for s in photo-app-main photo-app-bootstrap; do
+  aws codeconnections delete-sync-configuration --sync-type CFN_STACK_SYNC --resource-name $s
+done
+```
+
+**2. Empty the two disposable buckets.**
+
+```bash
+make empty CONFIRM=photo-app
+```
+
+| Bucket | Versioned | Holds | `make empty` |
+|---|---|---|---|
+| `photo-app-templates-<acct>-<region>` | no | the packaged children | emptied |
+| `photo-app-artifacts-<acct>-<region>` | no | pipeline working files | emptied |
+| `photo-app-media-<acct>-<region>` | yes | every uploaded photo | **never touched** |
+
+The media bucket is `Retain`, so no stack delete reaches it and neither does the
+make target. It is also the only versioned one, where `aws s3 rm --recursive`
+leaves versions and delete markers behind — removing it is a separate,
+deliberate act, below.
+
+**3. Delete the stacks yourself** — `photo-app-main` first, then
+`photo-app-bootstrap`. Console, or `aws cloudformation delete-stack`. Delete one
+before its bucket is empty and it stops at that resource: run step 2 and retry
+the delete.
+
+### What is left afterwards
+
+Four things outlive the three steps above on purpose, and each one destroys
+something you cannot get back.
+
+**The media bucket**, if you really do want the photos gone. It is versioned, so
+`s3 rm` on its own leaves versions and delete markers and the bucket still
+refuses to go:
+
+```bash
+R=eu-north-1
+ACCT=$(aws sts get-caller-identity --query Account --output text)
+B=photo-app-media-$ACCT-$R
+
+aws s3 rm "s3://$B" --recursive --region $R
+for what in Versions DeleteMarkers; do
+  while :; do
+    keys=$(aws s3api list-object-versions --bucket "$B" --region $R \
+      --max-items 500 --query "$what[].{Key:Key,VersionId:VersionId}" --output json)
+    [ "$keys" = "null" ] || [ "$keys" = "[]" ] && break
+    aws s3api delete-objects --bucket "$B" --region $R \
+      --delete "{\"Objects\":$keys,\"Quiet\":true}" >/dev/null
+  done
+done
+aws s3 rb "s3://$B" --region $R
+```
+
+**The rest of what survived.**
+
+```bash
+# the secret is only scheduled for deletion, and its NAME stays reserved
+aws secretsmanager delete-secret --secret-id photo-app/db \
+  --force-delete-without-recovery --region $R
+
+# billed, and kept because DeletionPolicy: Snapshot
+aws rds describe-db-snapshots --snapshot-type manual --region $R \
+  --query 'DBSnapshots[].DBSnapshotIdentifier' --output text
+aws rds delete-db-snapshot --db-snapshot-identifier <id> --region $R
+
+# the parameters no template owns
+for p in connection-arn s3-prefix-list-id; do
+  aws ssm delete-parameter --name /photo-app/$p --region $R 2>/dev/null
+done
+
+# RDS made this one, not CloudFormation
+aws logs delete-log-group --log-group-name /aws/rds/instance/photo-app-db/postgresql --region $R
+```
+
+**The two retained roles, last of all.**
+
 `photo-app-cfn-deployment` and `photo-app-gitsync` carry `DeletionPolicy:
-Retain` precisely because CloudFormation assumes the first of them to tear the
-stack down. Delete it early and the stack delete fails with *"role is invalid or
-cannot be assumed"*, and it keeps failing — CloudFormation caches the failure
-against the request token, so retrying alone will not clear it. The recovery is
-to recreate the role with the same name, delete the stack, then delete the role:
+Retain` precisely because CloudFormation assumes the first of them to tear its
+own stack down. Delete it early and the stack delete fails with *"role is
+invalid or cannot be assumed"* — permanently, because the failure is cached
+against the request token, so retrying alone will not clear it.
+
+```bash
+aws iam delete-role --role-name photo-app-cfn-deployment
+aws iam delete-role --role-name photo-app-gitsync
+```
+
+If you already deleted one too early, recreate it under the same name, delete
+the stack, then delete the role again:
 
 ```bash
 aws iam create-role --role-name photo-app-cfn-deployment \
   --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"cloudformation.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
 aws iam attach-role-policy --role-name photo-app-cfn-deployment \
   --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
-
-aws cloudformation delete-stack --stack-name photo-app-bootstrap
-
+aws cloudformation delete-stack --stack-name photo-app-bootstrap --region $R
 aws iam detach-role-policy --role-name photo-app-cfn-deployment \
   --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
 aws iam delete-role --role-name photo-app-cfn-deployment
 ```
 
-That `AdministratorAccess` attachment is a throwaway for the delete only.
-Remove it, or you leave an admin role behind.
+That `AdministratorAccess` is a throwaway for the delete only. Remove it, or you
+have left an admin role in the account.
 
-If a resource inside the stack refuses to delete, `delete-stack
---retain-resources <LogicalId>` skips it and you clean it up by hand.
+### The trap on rebuild
 
-Check nothing survives:
+Skip step 4's secret command and the next deploy in the same region fails with
+*"You can't create this secret because a secret with this name is already
+scheduled for deletion"*. The name `photo-app/db` stays reserved for the
+recovery window — thirty days by default. `--force-delete-without-recovery`
+is what releases it immediately.
+
+### Check nothing survives
 
 ```bash
-aws ec2 describe-vpc-endpoints --query 'VpcEndpoints[].ServiceName'
-aws rds describe-db-snapshots --snapshot-type manual
+aws s3 ls --region $R | grep photo-app
+aws rds describe-db-snapshots --snapshot-type manual --region $R --query 'DBSnapshots[].DBSnapshotIdentifier'
+aws ec2 describe-vpc-endpoints --region $R --query 'VpcEndpoints[].ServiceName'
+aws iam list-roles --query "Roles[?starts_with(RoleName,'photo-app')].RoleName"
+aws secretsmanager list-secrets --include-planned-deletion --region $R --query 'SecretList[].Name'
 ```
 
-Interface endpoints are the largest silent cost here.
+Interface endpoints are the largest silent cost if the VPC somehow survives.

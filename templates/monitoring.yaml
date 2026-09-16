@@ -1,18 +1,25 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: photo-uploader CloudWatch alarms - the ones that notify, not the ones that block
 
-# Notify only. The alarms that can stop a deployment are in codedeploy.yaml.
-# Deployed last: the dimensions come from the other stacks.
+# Notify only. The alarms that gate a deployment are in codedeploy.yaml.
 
 Parameters:
-  ProjectName: { Type: String }
-  AlertTopicArn: { Type: String }
-  DbInstanceIdentifier: { Type: String }
-  LoadBalancerFullName: { Type: String }
-  TargetGroupBlueFullName: { Type: String }
-  ClusterName: { Type: String }
-  ServiceName: { Type: String }
-  MaxCapacity: { Type: Number }
+  ProjectName:
+    Type: String
+  AlertTopicArn:
+    Type: String
+  DbInstanceIdentifier:
+    Type: String
+  LoadBalancerFullName:
+    Type: String
+  TargetGroupBlueFullName:
+    Type: String
+  ClusterName:
+    Type: String
+  ServiceName:
+    Type: String
+  MaxCapacity:
+    Type: Number
 
 Resources:
 
@@ -56,8 +63,7 @@ Resources:
       AlarmActions:
         - !Ref AlertTopicArn
 
-  # 2 workers x pool max_size 4 x 4 tasks is 32 at full scale. Seeing this
-  # alarm means the pool is leaking, not that traffic is real.
+  # 2 workers x pool 4 x 4 tasks is 32 at full scale; more means a leak.
   DbConnectionsAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
@@ -79,8 +85,7 @@ Resources:
 
   # --- Load balancer --------------------------------------------------------
 
-  # Not a deployment gate: during a cutover the green group is legitimately
-  # unhealthy for a few seconds.
+  # Not a gate: during a cutover the green group is briefly unhealthy.
   UnhealthyBlueTargetsAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:

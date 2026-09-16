@@ -6,18 +6,23 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# Read-only by default; only the job that talks to AWS gets more.
+# Nothing is written back to the repository: you commit main.packaged.yaml
+# yourself, and this job checks that what you committed is what the templates
+# produce.
 permissions:
   contents: read
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
-  check:
-    name: Lint templates
+  verify:
+    name: Lint and verify packaging
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - uses: actions/checkout@v7
 
@@ -25,46 +30,22 @@ jobs:
         with:
           python-version: '3.12'
 
-      # Pinned so a new release fails on the commit that bumps it, not on
-      # someone else's unrelated push.
-      - run: pip install cfn-lint==1.56.1
+      # The pinned version lives in the Makefile, so CI and a laptop install
+      # the same one.
+      - run: make tools
 
-      # The glob lives in the Makefile so it is not written down twice.
-      - run: make lint
+      # Pull requests stop here: no credentials, no S3.
+      - if: github.event_name == 'pull_request'
+        run: make lint
 
-  package:
-    name: Package
-    needs: check
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    # contents: write because the packaged template is committed back. Git sync
-    # deploys that commit, not the one you pushed.
-    permissions:
-      id-token: write
-      contents: write
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: aws-actions/configure-aws-credentials@v6
+      - if: github.event_name != 'pull_request'
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           role-session-name: ci-${{ github.run_id }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      # Uploads the children and rewrites their paths into bucket URLs. Package
-      # keys objects by content, so an unchanged template uploads nothing.
-      - run: make package
-
-      # Only when something moved. A push made with GITHUB_TOKEN starts no
-      # workflow, so this cannot loop.
-      - name: Commit the packaged template
-        run: |
-          if git diff --quiet -- main.packaged.yaml; then
-            echo "nothing to repackage"
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add main.packaged.yaml
-          git commit -m "repackage for ${GITHUB_SHA::7}"
-          git push
+      # Git sync has already deployed the commit you pushed. This is the check
+      # that the packaged file in it was honest, not a gate.
+      - if: github.event_name != 'pull_request'
+        run: make verify

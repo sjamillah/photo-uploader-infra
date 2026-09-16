@@ -1,16 +1,21 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: photo-uploader bootstrap - what must exist before Git sync or CI can run
 
-# Created by hand once: this stack makes the roles Git sync assumes.
-# deployments/bootstrap.yaml drives it from the repository after that.
+# Created by hand once, then driven by deployments/bootstrap.yaml.
 
 Metadata:
   AWS::CloudFormation::Interface:
     ParameterGroups:
-      - Label: { default: Naming }
-        Parameters: [ProjectName]
-      - Label: { default: Source control }
-        Parameters: [GitHubOrg, GitHubInfraRepo, GitHubBranch]
+      - Label:
+          default: Naming
+        Parameters:
+          - ProjectName
+      - Label:
+          default: Source control
+        Parameters:
+          - GitHubOrg
+          - GitHubInfraRepo
+          - GitHubBranch
 
 Parameters:
   ProjectName:
@@ -44,22 +49,26 @@ Parameters:
   CreateOidcProvider:
     Type: String
     Default: 'false'
-    AllowedValues: ['true', 'false']
+    AllowedValues:
+      - 'true'
+      - 'false'
     Description: >-
       One provider per URL per account. Leave false if the GitHub one already
       exists; check with aws iam list-open-id-connect-providers.
 
 Conditions:
-  NeedsOidcProvider: !Equals [!Ref CreateOidcProvider, 'true']
+  NeedsOidcProvider: !Equals
+    - !Ref CreateOidcProvider
+    - 'true'
 
 Resources:
 
   # --- Template staging -----------------------------------------------------
 
-  # Nested stacks need an S3 TemplateURL, and Git sync has no packaging step.
-  # CI uploads the children here under the commit SHA.
+  # Nested stacks need an S3 TemplateURL; CI stages the children here.
   TemplateBucket:
     Type: AWS::S3::Bucket
+    # Delete, not Retain: nothing here is precious. make empty clears it first.
     DeletionPolicy: Delete
     Properties:
       BucketName: !Sub '${ProjectName}-templates-${AWS::AccountId}-${AWS::Region}'
@@ -75,17 +84,16 @@ Resources:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
-      VersioningConfiguration:
-        Status: Enabled
+      # Not versioned: package keys every object by content.
       LifecycleConfiguration:
         Rules:
           - Id: expire-old-template-sets
             Status: Enabled
             ExpirationInDays: 90
-          - Id: expire-noncurrent
+          - Id: abort-incomplete-uploads
             Status: Enabled
-            NoncurrentVersionExpiration:
-              NoncurrentDays: 14
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
 
   TemplateBucketPolicy:
     Type: AWS::S3::BucketPolicy
@@ -105,8 +113,7 @@ Resources:
               Bool:
                 'aws:SecureTransport': false
 
-  # Published so the main stack can find the bucket without the name being
-  # written into the repository, where it would carry the account id.
+  # Published so the name, which carries the account id, stays out of the repo.
   TemplateBucketParameter:
     Type: AWS::SSM::Parameter
     Properties:
@@ -115,8 +122,7 @@ Resources:
       Value: !Ref TemplateBucket
       Description: Bucket holding the staged child templates
 
-  # Read by main.yaml for the nested TemplateURLs and by the workflow, so the
-  # templates land where the stack looks for them.
+  # Read by the Makefile, so templates land where main.yaml looks for them.
   TemplatePrefixParameter:
     Type: AWS::SSM::Parameter
     Properties:
@@ -153,12 +159,10 @@ Resources:
             Action: 'sts:AssumeRoleWithWebIdentity'
             Condition:
               StringEquals:
-                # Without the aud check, any repository on GitHub could
-                # present a token to this role.
+                # Without the aud check, any GitHub repo could present a token.
                 'token.actions.githubusercontent.com:aud': sts.amazonaws.com
               StringLike:
-                # GitHub appends numeric ids so the claim survives a rename.
-                # Both shapes accepted; the literal @ anchors the wildcard.
+                # GitHub appends numeric ids on rename; the literal @ anchors it.
                 'token.actions.githubusercontent.com:sub':
                   - !Sub 'repo:${GitHubOrg}/${GitHubInfraRepo}:ref:refs/heads/${GitHubBranch}'
                   - !Sub 'repo:${GitHubOrg}@*/${GitHubInfraRepo}@*:ref:refs/heads/${GitHubBranch}'
@@ -178,8 +182,7 @@ Resources:
                   - 's3:GetBucketLocation'
                 Resource: !GetAtt TemplateBucket.Arn
 
-              # Where to sync. The script reads both rather than taking them
-              # as arguments, so the bucket and prefix are defined once.
+              # Where to stage. CI only writes templates; Git sync deploys them.
               - Effect: Allow
                 Action: 'ssm:GetParameter'
                 Resource:
@@ -189,8 +192,7 @@ Resources:
   # Assumed by CloudFormation to build the stacks. Nothing else can use it.
   CfnDeploymentRole:
     Type: AWS::IAM::Role
-    # Retained: CloudFormation assumes this to tear the stack down, and
-    # deleting it partway strands the delete. Remove it by hand afterwards.
+    # Retained: deleting it partway strands the stack delete.
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
@@ -211,8 +213,7 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              # Broad within each service, but the role cannot reach anything
-              # outside this list.
+              # Broad within each service, but nothing outside this list.
               - Sid: ProjectServices
                 Effect: Allow
                 Action:
@@ -234,9 +235,15 @@ Resources:
                   - 'events:*'
                   - 'sns:*'
                   - 'cloudformation:*'
+                  # Write and delete too: this stack owns those parameters.
                   - 'ssm:GetParameter'
                   - 'ssm:GetParameters'
                   - 'ssm:DescribeParameters'
+                  - 'ssm:PutParameter'
+                  - 'ssm:DeleteParameter'
+                  - 'ssm:AddTagsToResource'
+                  - 'ssm:RemoveTagsFromResource'
+                  - 'ssm:ListTagsForResource'
                 Resource: '*'
 
               # AWS managed keys only. ViaService stops the role reaching a key alone.
@@ -255,8 +262,7 @@ Resources:
                       - !Sub 'secretsmanager.${AWS::Region}.amazonaws.com'
                       - !Sub 's3.${AWS::Region}.amazonaws.com'
 
-              # IAM is scoped by name prefix. Even with ec2:*, a role that
-              # cannot mint arbitrary roles cannot escalate its own privileges.
+              # Scoped by name prefix: it cannot mint arbitrary roles.
               - Sid: ManageProjectRolesOnly
                 Effect: Allow
                 Action:
@@ -300,8 +306,7 @@ Resources:
                       - elasticloadbalancing.amazonaws.com
                       - ecs.application-autoscaling.amazonaws.com
 
-        # Global services are exempt because their calls carry no regional
-        # context; everything else is confined to the deployment region.
+        # Global services carry no regional context; the rest is pinned.
         - PolicyName: region-lock
           PolicyDocument:
             Version: '2012-10-17'
@@ -380,8 +385,7 @@ Resources:
                 Resource:
                   - !GetAtt TemplateBucket.Arn
                   - !Sub '${TemplateBucket.Arn}/*'
-              # Git sync creates its own watch rule; the name is generated by the
-              # service, so it cannot be scoped by name.
+              # Git sync generates this rule's name, so it cannot be scoped.
               - Sid: ManageTheSyncEventRule
                 Effect: Allow
                 Action:

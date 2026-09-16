@@ -1,11 +1,9 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: photo-uploader alerting - the topic every alarm and the pipeline publish to
 
-# Built first: service.yaml, pipeline.yaml and monitoring.yaml all need the
-# topic ARN, and nothing else in the stack depends on it.
-
 Parameters:
-  ProjectName: { Type: String }
+  ProjectName:
+    Type: String
 
   AlertEmail:
     Type: String
@@ -15,7 +13,10 @@ Parameters:
     Description: Leave blank to create the topic without a subscription.
 
 Conditions:
-  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, '']]
+  HasAlertEmail: !Not
+    - !Equals
+      - !Ref AlertEmail
+      - ''
 
 Resources:
 
@@ -25,8 +26,7 @@ Resources:
       TopicName: !Sub '${ProjectName}-alerts'
       DisplayName: !Sub '${ProjectName} alerts'
 
-  # CloudWatch and EventBridge publish here on their own behalf, so the topic
-  # has to name them. Without this the alarms fire and nothing is delivered.
+  # Both publish on their own behalf; without this, alarms fire into nothing.
   TopicPolicy:
     Type: AWS::SNS::TopicPolicy
     Properties:
@@ -47,8 +47,7 @@ Resources:
               StringEquals:
                 'AWS:SourceAccount': !Ref AWS::AccountId
 
-  # Conditional, so a blank address still gets a topic. AWS emails a
-  # confirmation link that has to be clicked before anything is delivered.
+  # AWS emails a confirmation link that has to be clicked first.
   Subscription:
     Type: AWS::SNS::Subscription
     Condition: HasAlertEmail

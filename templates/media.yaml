@@ -2,15 +2,17 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: photo-uploader media delivery - private S3 bucket behind CloudFront
 
 Parameters:
-  ProjectName: { Type: String }
+  ProjectName:
+    Type: String
 
 Resources:
 
   # --- Media storage and delivery -------------------------------------------
 
+  # Retain: a stack delete must never be able to destroy uploaded photos.
   MediaBucket:
     Type: AWS::S3::Bucket
-    DeletionPolicy: Delete
+    DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
       BucketName: !Sub '${ProjectName}-media-${AWS::AccountId}-${AWS::Region}'
@@ -62,8 +64,7 @@ Resources:
         IPV6Enabled: true
         Origins:
           - Id: media-origin
-            # RegionalDomainName avoids the 307 redirect a new bucket returns
-            # for about a day while its DNS propagates.
+            # Avoids the 307 a new bucket returns for a day while DNS propagates.
             DomainName: !GetAtt MediaBucket.RegionalDomainName
             OriginAccessControlId: !GetAtt OriginAccessControl.Id
             S3OriginConfig:
@@ -71,8 +72,12 @@ Resources:
         DefaultCacheBehavior:
           TargetOriginId: media-origin
           ViewerProtocolPolicy: redirect-to-https
-          AllowedMethods: [GET, HEAD]
-          CachedMethods: [GET, HEAD]
+          AllowedMethods:
+            - GET
+            - HEAD
+          CachedMethods:
+            - GET
+            - HEAD
           Compress: true
           CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6            # CachingOptimized
           ResponseHeadersPolicyId: 67f7725c-6f97-4210-82d7-5512b31e9d03  # SecurityHeadersPolicy

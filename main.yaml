@@ -1,15 +1,10 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: photo-uploader main stack - composes the twelve templates in templates/
 
-# Order comes from the !GetAtt references between the children; values flow
-# down as parameters, so none of them uses Fn::ImportValue.
-
-# The last four are conditional. A service cannot start before CI has pushed
-# an image into the registry this same stack has only just created.
+# The last four children are conditional: nothing runs before CI pushes an image.
 
 Metadata:
-  # Children are referenced by path; make package rewrites them into bucket
-  # URLs and writes main.packaged.yaml, which is what Git sync deploys.
+  # Referenced by path; make package rewrites these into bucket URLs.
   cfn-lint:
     config:
       ignore_checks:
@@ -17,13 +12,27 @@ Metadata:
 
   AWS::CloudFormation::Interface:
     ParameterGroups:
-      - Label: { default: Naming }
-        Parameters: [ProjectName]
-      - Label: { default: Addressing }
-        Parameters: [VpcCidr, PublicTierCidr, AppTierCidr, DataTierCidr, S3PrefixListId]
-      - Label: { default: Database }
-        Parameters: [DbName, DbInstanceClass, DbEngineVersion, DbMultiAZ]
-      - Label: { default: Application }
+      - Label:
+          default: Naming
+        Parameters:
+          - ProjectName
+      - Label:
+          default: Addressing
+        Parameters:
+          - VpcCidr
+          - PublicTierCidr
+          - AppTierCidr
+          - DataTierCidr
+          - S3PrefixListId
+      - Label:
+          default: Database
+        Parameters:
+          - DbName
+          - DbInstanceClass
+          - DbEngineVersion
+          - DbMultiAZ
+      - Label:
+          default: Application
         Parameters:
           - TriggerImageTag
           - ContainerPort
@@ -32,8 +41,13 @@ Metadata:
           - MinCapacity
           - MaxCapacity
           - CpuTargetPercent
-      - Label: { default: Source control }
-        Parameters: [ConnectionArn, GitHubOrg, GitHubAppRepo, GitHubBranch]
+      - Label:
+          default: Source control
+        Parameters:
+          - ConnectionArn
+          - GitHubOrg
+          - GitHubAppRepo
+          - GitHubBranch
 
 Parameters:
 
@@ -84,7 +98,9 @@ Parameters:
   DbMultiAZ:
     Type: String
     Default: 'true'
-    AllowedValues: ['true', 'false']
+    AllowedValues:
+      - 'true'
+      - 'false'
 
   AlertEmail:
     Type: String
@@ -93,10 +109,14 @@ Parameters:
     ConstraintDescription: An email address, or blank for no subscription.
     Description: Where alarms are delivered. Blank creates the topic without one.
 
+  # In the deployment file, not Parameter Store: changing it there is itself
+  # the commit that makes Git sync deploy the second pass.
   DeployApplication:
     Type: String
-    Default: 'true'
-    AllowedValues: ['true', 'false']
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
     Description: >-
       false on the first pass, which builds the registry. Push an image, then
       set it to true: the service cannot start without one.
@@ -105,6 +125,10 @@ Parameters:
     Type: String
     Default: latest
     Description: Moving tag the EventBridge rule watches.
+
+  DbPort:
+    Type: Number
+    Default: 5432
 
   ContainerPort:
     Type: Number
@@ -146,11 +170,12 @@ Parameters:
     Default: main
 
 Conditions:
-  DeployApplication: !Equals [!Ref DeployApplication, 'true']
+  DeployApplication: !Equals
+    - !Ref DeployApplication
+    - 'true'
 
 Resources:
 
-  # CI pushes into this, and only then can the service find something to run.
   EcrStack:
     Type: AWS::CloudFormation::Stack
     Properties:
@@ -180,13 +205,13 @@ Resources:
         AppTierCidr: !Ref AppTierCidr
         DataTierCidr: !Ref DataTierCidr
 
-  # Read on its own: this is the file to check least privilege in.
   SecurityStack:
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: templates/security.yaml
       TimeoutInMinutes: 15
       Parameters:
+        DbPort: !Ref DbPort
         ProjectName: !Ref ProjectName
         VpcId: !GetAtt VpcStack.Outputs.VpcId
         S3PrefixListId: !Ref S3PrefixListId
@@ -199,6 +224,7 @@ Resources:
       TemplateURL: templates/endpoints.yaml
       TimeoutInMinutes: 20
       Parameters:
+        ProjectName: !Ref ProjectName
         VpcId: !GetAtt VpcStack.Outputs.VpcId
         AppSubnetIds: !GetAtt VpcStack.Outputs.PrivateAppSubnets
         RouteTableIds: !GetAtt VpcStack.Outputs.PrivateRouteTables
@@ -227,8 +253,7 @@ Resources:
         DbEngineVersion: !Ref DbEngineVersion
         DbMultiAZ: !Ref DbMultiAZ
 
-  # Defined here only. The roles are created before the resources they
-  # grant access to, so the name is handed to both stacks instead.
+  # Roles are created before what they grant access to, so the name is passed.
   IamStack:
     Type: AWS::CloudFormation::Stack
     Properties:
@@ -264,8 +289,7 @@ Resources:
         VpcId: !GetAtt VpcStack.Outputs.VpcId
         PublicSubnetIds: !GetAtt VpcStack.Outputs.PublicSubnets
         AlbSecurityGroupId: !GetAtt SecurityStack.Outputs.AlbSecurityGroupId
-        # Must be identical on every update: ECS refuses to move a CODE_DEPLOY
-        # service onto a new task definition. CodeDeploy owns the image.
+        # Must not move: ECS refuses to retask a CODE_DEPLOY service.
         ImageUri: !Sub
           - '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${Repo}:${Tag}'
           - Repo: !GetAtt EcrStack.Outputs.RepositoryName
@@ -277,8 +301,6 @@ Resources:
         MaxCapacity: !Ref MaxCapacity
         CpuTargetPercent: !Ref CpuTargetPercent
 
-  # CodeDeploy owns the relationship between the service and the two target
-  # groups, so it is described apart from the service that creates them.
   CodeDeployStack:
     Condition: DeployApplication
     Type: AWS::CloudFormation::Stack
@@ -336,8 +358,7 @@ Resources:
 
 Outputs:
 
-  # Goes in the app repository's AWS_ROLE_ARN secret. Not conditional: it is
-  # needed on the first pass, before there is an image to deploy.
+  # The app repo's AWS_ROLE_ARN. Needed on the first pass, so not conditional.
   GitHubAppRoleArn:
     Description: Role GitHub Actions in the app repository assumes
     Value: !GetAtt IamStack.Outputs.GitHubAppRoleArn

@@ -4,31 +4,41 @@ Description: >-
   photo-uploader application tier - load balancer, target group pair,
   listeners, ECS cluster, task definition, service, auto scaling
 
-# The blue/green wiring and the alarms that gate a cutover are in
-# codedeploy.yaml; the alarms that only notify are in monitoring.yaml.
+# Blue/green wiring is in codedeploy.yaml, notify-only alarms in monitoring.yaml.
 
 Parameters:
-  ProjectName: { Type: String }
+  ProjectName:
+    Type: String
 
-  AppSubnetIds: { Type: List<AWS::EC2::Subnet::Id> }
+  AppSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
 
-  EcsSecurityGroupId: { Type: AWS::EC2::SecurityGroup::Id }
+  EcsSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
 
-  MediaBucketName: { Type: String }
+  MediaBucketName:
+    Type: String
 
-  CloudFrontDomain: { Type: String }
+  CloudFrontDomain:
+    Type: String
 
-  DbSecretArn: { Type: String }
+  DbSecretArn:
+    Type: String
 
-  TaskExecutionRoleArn: { Type: String }
+  TaskExecutionRoleArn:
+    Type: String
 
-  TaskRoleArn: { Type: String }
+  TaskRoleArn:
+    Type: String
 
-  VpcId: { Type: AWS::EC2::VPC::Id }
+  VpcId:
+    Type: AWS::EC2::VPC::Id
 
-  PublicSubnetIds: { Type: List<AWS::EC2::Subnet::Id> }
+  PublicSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
 
-  AlbSecurityGroupId: { Type: AWS::EC2::SecurityGroup::Id }
+  AlbSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
 
   ImageUri:
     Type: String
@@ -36,23 +46,36 @@ Parameters:
       Repository and tag, never a digest. A CODE_DEPLOY service rejects any
       CloudFormation change to its task definition, so this must never move.
 
-  ContainerPort: { Type: Number }
+  ContainerPort:
+    Type: Number
+    MinValue: 1
+    MaxValue: 65535
+    Description: Passed from main.yaml. The same value the target groups and the container use.
 
   TaskCpu:
     Type: String
-    AllowedValues: ['256', '512', '1024']
+    AllowedValues:
+      - '256'
+      - '512'
+      - '1024'
 
   TaskMemory:
     Type: String
-    AllowedValues: ['512', '1024', '2048', '4096']
+    AllowedValues:
+      - '512'
+      - '1024'
+      - '2048'
+      - '4096'
 
   DesiredCount:
     Type: Number
     Default: 1
 
-  MinCapacity: { Type: Number }
+  MinCapacity:
+    Type: Number
 
-  MaxCapacity: { Type: Number }
+  MaxCapacity:
+    Type: Number
 
   CpuTargetPercent:
     Type: Number
@@ -80,8 +103,7 @@ Resources:
       LoadBalancerAttributes:
         - Key: idle_timeout.timeout_seconds
           Value: '60'
-        # Rejects malformed headers instead of forwarding them, which closes
-        # off a class of request-smuggling attacks.
+        # Rejects malformed headers, closing off request smuggling.
         - Key: routing.http.drop_invalid_header_fields.enabled
           Value: 'true'
         - Key: deletion_protection.enabled
@@ -91,11 +113,11 @@ Resources:
 
   # --- Target groups --------------------------------------------------------
 
-  # Identical by design: CodeDeploy swaps traffic between them, so any
-  # difference would change behaviour depending on which is live.
+  # Identical by design: any difference changes behaviour with which is live.
   Fn::ForEach::TargetGroups:
     - Colour
-    - [Blue, Green]
+    - - Blue
+      - Green
     - TargetGroup${Colour}:
         Type: AWS::ElasticLoadBalancingV2::TargetGroup
         Properties:
@@ -113,8 +135,7 @@ Resources:
           Matcher:
             HttpCode: '200'
           TargetGroupAttributes:
-            # The 300s default would leave a cutover draining for five
-            # minutes with nothing left to drain.
+            # The 300s default drains for five minutes with nothing to drain.
             - Key: deregistration_delay.timeout_seconds
               Value: '30'
 
@@ -160,8 +181,7 @@ Resources:
         - FARGATE
       NetworkMode: awsvpc
       Cpu: !Ref TaskCpu
-      # Image decoding makes memory a function of pixels, not of Python.
-      # See MAX_IMAGE_PIXELS in the application repo.
+      # Memory is a function of pixels, not Python. See MAX_IMAGE_PIXELS.
       Memory: !Ref TaskMemory
       RuntimePlatform:
         OperatingSystemFamily: LINUX
@@ -172,8 +192,7 @@ Resources:
         - Name: app
           Image: !Ref ImageUri
           Essential: true
-          # Must exceed the target group's 30s deregistration delay, or a
-          # cutover severs requests the ALB is still draining.
+          # Must exceed the 30s deregistration delay, or draining is severed.
           StopTimeout: 45
           PortMappings:
             - ContainerPort: !Ref ContainerPort
@@ -187,8 +206,7 @@ Resources:
               Value: !Ref CloudFrontDomain
             - Name: PORT
               Value: !Ref ContainerPort
-          # Format is arn:json-key:version-stage:version-id, and the two
-          # trailing fields are left empty.
+          # arn:json-key:version-stage:version-id, trailing fields empty.
           Secrets:
             - Name: DB_HOST
               ValueFrom: !Sub '${DbSecretArn}:host::'
@@ -206,8 +224,7 @@ Resources:
               awslogs-group: !Ref LogGroup
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: app
-          # urllib, not curl: the slim image has none, and adding one just
-          # for a health check is waste.
+          # urllib, not curl: the slim image has none.
           HealthCheck:
             Command:
               - CMD-SHELL
@@ -223,8 +240,7 @@ Resources:
 
   Service:
     Type: AWS::ECS::Service
-    # ECS rejects a target group that is not yet attached to a listener.
-    # Across two stacks the ordering was implicit; in one it has to be said.
+    # ECS rejects a target group not yet attached to a listener.
     DependsOn: Listener
     Properties:
       ServiceName: !Sub '${ProjectName}-service'
@@ -233,8 +249,7 @@ Resources:
       DesiredCount: !Ref DesiredCount
       LaunchType: FARGATE
       PlatformVersion: LATEST
-      # From here on CodeDeploy owns task-definition changes, not
-      # CloudFormation. Editing TaskDefinition above will not move the service.
+      # CodeDeploy owns task-definition changes now; editing it above does nothing.
       DeploymentController:
         Type: CODE_DEPLOY
       NetworkConfiguration:
