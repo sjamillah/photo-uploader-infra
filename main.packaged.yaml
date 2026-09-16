@@ -168,6 +168,7 @@ Resources:
     Properties:
       TemplateURL: 
         https://s3.eu-north-1.amazonaws.com/photo-app-templates-697863031884-eu-north-1/latest/3aa28b14935b546e1b1140c007168da6.template
+        https://s3.eu-north-1.amazonaws.com/photo-app-templates-697863031884-eu-north-1/latest/3aa28b14935b546e1b1140c007168da6.template
       TimeoutInMinutes: 20
       Parameters:
         ProjectName:
@@ -199,6 +200,8 @@ Resources:
           Ref: S3PrefixListId
         ContainerPort:
           Ref: ContainerPort
+        ContainerPort:
+          Ref: ContainerPort
   EndpointsStack:
     Type: AWS::CloudFormation::Stack
     Properties:
@@ -206,8 +209,6 @@ Resources:
         https://s3.eu-north-1.amazonaws.com/photo-app-templates-697863031884-eu-north-1/latest/7970255951589aaa702af672cf55cbef.template
       TimeoutInMinutes: 20
       Parameters:
-        ProjectName:
-          Ref: ProjectName
         VpcId:
           Fn::GetAtt:
           - VpcStack
