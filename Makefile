@@ -24,8 +24,10 @@ tools:
 	$(HOME)/.venvs/cfn/bin/pip install --quiet "$(CFN_LINT_PIN)"
 	@$(HOME)/.venvs/cfn/bin/cfn-lint --version
 
+# Sources only. *.yaml would sweep in main.packaged.yaml, and a stale
+# artefact would then block the very target that regenerates it.
 lint:
-	$(CFN_LINT) *.yaml templates/*.yaml
+	$(CFN_LINT) main.yaml bootstrap.yaml templates/*.yaml
 
 # Run before every push, then commit main.packaged.yaml alongside your
 # change. Linting first keeps a broken template out of S3.
