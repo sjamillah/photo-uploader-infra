@@ -93,7 +93,7 @@ Parameters:
 
   DbEngineVersion:
     Type: String
-    Default: '16'
+    Default: '16.15'
 
   DbMultiAZ:
     Type: String

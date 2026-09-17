@@ -14,7 +14,9 @@ BUCKET    = $(shell aws ssm get-parameter --name /$(PROJECT)/template-bucket \
 PREFIX    = $(shell aws ssm get-parameter --name /$(PROJECT)/template-prefix \
               --query Parameter.Value --output text 2>/dev/null)
 ARTIFACTS = $(PROJECT)-artifacts-$(ACCOUNT)-$(REGION)
-.PHONY: tools lint package verify empty
+DB_VERSION = $(shell grep -A3 '^  DbEngineVersion:' main.yaml | grep Default | tr -d " '" | cut -d: -f2)
+DB_CLASS   = $(shell grep -A3 '^  DbInstanceClass:' main.yaml | grep Default | tr -d " '" | cut -d: -f2)
+.PHONY: tools preflight lint package verify empty
 
 # Run once per machine. An isolated venv, because newer Ubuntu refuses
 # pip install --user outright.
@@ -23,6 +25,15 @@ tools:
 	$(HOME)/.venvs/cfn/bin/pip install --quiet --upgrade pip
 	$(HOME)/.venvs/cfn/bin/pip install --quiet "$(CFN_LINT_PIN)"
 	@$(HOME)/.venvs/cfn/bin/cfn-lint --version
+
+# RDS rejects some engine/class/storage/Multi-AZ combinations with a bare
+# "Validation failure", fifteen minutes into a create. Ask it first.
+preflight:
+	@echo "postgres $(DB_VERSION) on $(DB_CLASS) in $(REGION):"
+	@aws rds describe-orderable-db-instance-options --engine postgres \
+	  --engine-version $(DB_VERSION) --db-instance-class $(DB_CLASS) \
+	  --query 'OrderableDBInstanceOptions[].[StorageType,MultiAZCapable,StorageEncryptionCapable]' \
+	  --output table
 
 # Sources only. *.yaml would sweep in main.packaged.yaml, and a stale
 # artefact would then block the very target that regenerates it.
