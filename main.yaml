@@ -335,6 +335,7 @@ Resources:
         GitHubBranch: !Ref GitHubBranch
         PipelineRoleArn: !GetAtt IamStack.Outputs.PipelineRoleArn
         EventBridgeRoleArn: !GetAtt IamStack.Outputs.EventBridgeRoleArn
+        CodeBuildRoleArn: !GetAtt IamStack.Outputs.CodeBuildRoleArn
         EcrRepositoryName: !GetAtt EcrStack.Outputs.RepositoryName
         TriggerImageTag: !Ref TriggerImageTag
         CodeDeployApplicationName: !GetAtt CodeDeployStack.Outputs.ApplicationName

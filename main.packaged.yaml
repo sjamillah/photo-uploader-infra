@@ -228,7 +228,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: 
-        https://s3.eu-north-1.amazonaws.com/photo-app-templates-697863031884-eu-north-1/latest/9bf99650494747863af8456d508a3d67.template
+        https://s3.eu-north-1.amazonaws.com/photo-app-templates-697863031884-eu-north-1/latest/e7bdf33fc7b609192d8af49f21318f87.template
       TimeoutInMinutes: 30
       Parameters:
         ProjectName:
@@ -237,7 +237,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: 
-        https://s3.eu-north-1.amazonaws.com/photo-app-templates-697863031884-eu-north-1/latest/25c778f6aa3720f55b09c9e1067ba9d6.template
+        https://s3.eu-north-1.amazonaws.com/photo-app-templates-697863031884-eu-north-1/latest/0a4dd5ce57b4d6cffd6b6491b3737233.template
       TimeoutInMinutes: 45
       Parameters:
         ProjectName:
@@ -262,7 +262,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: 
-        https://s3.eu-north-1.amazonaws.com/photo-app-templates-697863031884-eu-north-1/latest/e1dfb15648d039717276f1b48f2acd2e.template
+        https://s3.eu-north-1.amazonaws.com/photo-app-templates-697863031884-eu-north-1/latest/3dfbae9930ecfc015f7e81652de9c808.template
       TimeoutInMinutes: 15
       Parameters:
         ProjectName:
@@ -409,7 +409,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: 
-        https://s3.eu-north-1.amazonaws.com/photo-app-templates-697863031884-eu-north-1/latest/dc4e66e51a2b917e27192acdf403d142.template
+        https://s3.eu-north-1.amazonaws.com/photo-app-templates-697863031884-eu-north-1/latest/078ea35b7418b76b6559a674118a17ae.template
       TimeoutInMinutes: 20
       Parameters:
         ProjectName:
@@ -438,6 +438,10 @@ Resources:
           Fn::GetAtt:
           - IamStack
           - Outputs.EventBridgeRoleArn
+        CodeBuildRoleArn:
+          Fn::GetAtt:
+          - IamStack
+          - Outputs.CodeBuildRoleArn
         EcrRepositoryName:
           Fn::GetAtt:
           - EcrStack

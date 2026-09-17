@@ -107,6 +107,39 @@ Resources:
       TargetId: !Ref Database
       TargetType: AWS::RDS::DBInstance
 
+  # The secret's ARN carries a generated suffix that moves every time the stack
+  # is rebuilt, which is what went stale in taskdef.json. A parameter ARN is
+  # built from the name, so these can be referenced forever.
+  # The one value nothing can derive. Published so the render stage can read
+  # it by a name we choose instead of the repository pinning its suffix.
+  DbSecretArnParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/${ProjectName}/db/secret-arn'
+      Type: String
+      Value: !Ref DbSecret
+
+  DbHostParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/${ProjectName}/db/host'
+      Type: String
+      Value: !GetAtt Database.Endpoint.Address
+
+  DbPortParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/${ProjectName}/db/port'
+      Type: String
+      Value: !GetAtt Database.Endpoint.Port
+
+  DbNameParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/${ProjectName}/db/name'
+      Type: String
+      Value: !Ref DbName
+
 Outputs:
   DbSecretArn:
     Value: !Ref DbSecret

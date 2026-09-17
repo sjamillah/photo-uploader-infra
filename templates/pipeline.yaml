@@ -34,6 +34,10 @@ Parameters:
   EventBridgeRoleArn:
     Type: String
 
+  CodeBuildRoleArn:
+    Type: String
+    Description: Role the render stage runs as.
+
   EcrRepositoryName:
     Type: String
 
@@ -96,6 +100,44 @@ Resources:
               Bool:
                 'aws:SecureTransport': false
 
+  # --- Render stage ---------------------------------------------------------
+
+  RenderLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: !Sub '/aws/codebuild/${ProjectName}-render'
+      RetentionInDays: 14
+
+  # CodeDeployToECS substitutes only IMAGE1_NAME, so anything else the task
+  # definition needs has to be literal by the time it reaches the deploy action.
+  # This resolves it here, from Parameter Store, rather than in the repository.
+  RenderProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${ProjectName}-render'
+      Description: Renders deploy/taskdef.json from its template
+      ServiceRole: !Ref CodeBuildRoleArn
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: deploy/buildspec.yml
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:5.0
+        EnvironmentVariables:
+          # The only input. Every name in the template derives from it.
+          - Name: PROJECT
+            Type: PLAINTEXT
+            Value: !Ref ProjectName
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Ref RenderLogGroup
+      TimeoutInMinutes: 10
+
   # --- Pipeline -------------------------------------------------------------
 
   Pipeline:
@@ -141,6 +183,21 @@ Resources:
               OutputArtifacts:
                 - Name: ConfigArtifact
 
+        - Name: Render
+          Actions:
+            - Name: TaskDefinition
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: ConfigArtifact
+              OutputArtifacts:
+                - Name: RenderedArtifact
+              Configuration:
+                ProjectName: !Ref RenderProject
+
         - Name: Deploy
           Actions:
             - Name: BlueGreen
@@ -150,14 +207,14 @@ Resources:
                 Provider: CodeDeployToECS
                 Version: '1'
               InputArtifacts:
-                - Name: ConfigArtifact
+                - Name: RenderedArtifact
                 - Name: ImageArtifact
               Configuration:
                 ApplicationName: !Ref CodeDeployApplicationName
                 DeploymentGroupName: !Ref CodeDeployDeploymentGroupName
-                TaskDefinitionTemplateArtifact: ConfigArtifact
+                TaskDefinitionTemplateArtifact: RenderedArtifact
                 TaskDefinitionTemplatePath: deploy/taskdef.json
-                AppSpecTemplateArtifact: ConfigArtifact
+                AppSpecTemplateArtifact: RenderedArtifact
                 AppSpecTemplatePath: deploy/appspec.yaml
                 # Substitutes the digest into IMAGE1_NAME in taskdef.json.
                 Image1ArtifactName: ImageArtifact

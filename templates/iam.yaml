@@ -51,6 +51,16 @@ Resources:
               - Effect: Allow
                 Action: 'secretsmanager:GetSecretValue'
                 Resource: !Sub '${DbSecretArn}*'
+        # AmazonECSTaskExecutionRolePolicy does not cover Parameter Store.
+        - PolicyName: read-config-parameters
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 'ssm:GetParameters'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/db/*'
+                  - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/cdn/*'
 
   # Separate from the execution role: app code cannot pull images or read secrets.
   TaskRole:
@@ -159,6 +169,13 @@ Resources:
                   - 'ecs:DescribeTaskDefinition'
                   - 'ecs:DescribeServices'
                 Resource: '*'
+              - Sid: DriveCodeBuild
+                Effect: Allow
+                Action:
+                  - 'codebuild:StartBuild'
+                  - 'codebuild:BatchGetBuilds'
+                  - 'codebuild:StopBuild'
+                Resource: !Sub 'arn:${AWS::Partition}:codebuild:${AWS::Region}:${AWS::AccountId}:project/${ProjectName}-render'
               - Sid: PassTaskRoles
                 Effect: Allow
                 Action: 'iam:PassRole'
@@ -233,6 +250,50 @@ Resources:
                 # From ecr.yaml's output, so this cannot precede the repository.
                 Resource: !Ref EcrRepositoryArn
 
+  # Renders taskdef.json at deploy time, so the app repository holds no ARNs.
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-codebuild-render'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: render-taskdef
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # CreateLogGroup as well: CodeBuild asks for it even though
+              # pipeline.yaml pre-creates the group to set a retention period.
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${ProjectName}-render'
+                  - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${ProjectName}-render:*'
+              - Sid: Artifacts
+                Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:GetObjectVersion'
+                  - 's3:PutObject'
+                  - 's3:GetBucketLocation'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::${ArtifactBucketName}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${ArtifactBucketName}/*'
+              # Read only. The render stage resolves names, it does not write them.
+              - Sid: ReadProjectParameters
+                Effect: Allow
+                Action: 'ssm:GetParameter'
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/*'
+
 Outputs:
   GitHubAppRoleArn:
     Description: Set as secret AWS_ROLE_ARN in the application repository
@@ -252,3 +313,6 @@ Outputs:
 
   EventBridgeRoleArn:
     Value: !GetAtt EventBridgeRole.Arn
+
+  CodeBuildRoleArn:
+    Value: !GetAtt CodeBuildRole.Arn

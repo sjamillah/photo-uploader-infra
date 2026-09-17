@@ -111,6 +111,14 @@ Resources:
               Bool:
                 'aws:SecureTransport': false
 
+  # CloudFront generates this domain; nothing downstream can predict it.
+  CdnDomainParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/${ProjectName}/cdn/domain'
+      Type: String
+      Value: !GetAtt Distribution.DomainName
+
 Outputs:
   MediaBucketName:
     Value: !Ref MediaBucket
