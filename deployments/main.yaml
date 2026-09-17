@@ -4,9 +4,9 @@
 template-file-path: main.packaged.yaml
 
 parameters:
-  # false on the first pass: the service cannot start before CI has pushed an
-  # image. Flip to true and push; that commit is the trigger.
-  DeployApplication: 'false'
+  # Only true once an image is in ECR: the service, CodeDeploy and the
+  # pipeline come up with this commit, and a task with nothing to pull cycles.
+  DeployApplication: 'true'
 
   GitHubOrg: sjamillah
 
