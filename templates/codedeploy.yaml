@@ -48,7 +48,7 @@ Resources:
         TerminateBlueInstancesOnDeploymentSuccess:
           Action: TERMINATE
           # Old tasks outlive the cutover, so a rollback needs no cold start.
-          TerminationWaitTimeInMinutes: 5
+          TerminationWaitTimeInMinutes: 0
       AutoRollbackConfiguration:
         Enabled: true
         Events:
@@ -90,7 +90,7 @@ Resources:
           Value: !Ref LoadBalancerFullName
       Statistic: Sum
       Period: 60
-      EvaluationPeriods: 2
+      EvaluationPeriods: 1
       Threshold: 5
       ComparisonOperator: GreaterThanOrEqualToThreshold
       # No traffic must not read as failure, or a quiet night pages someone.
@@ -113,7 +113,7 @@ Resources:
       # p95, not Average, which hides the tail.
       ExtendedStatistic: p95
       Period: 60
-      EvaluationPeriods: 3
+      EvaluationPeriods: 1
       Threshold: 2
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching

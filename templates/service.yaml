@@ -128,16 +128,16 @@ Resources:
           Port: !Ref ContainerPort
           HealthCheckProtocol: HTTP
           HealthCheckPath: /health
-          HealthCheckIntervalSeconds: 15
-          HealthCheckTimeoutSeconds: 5
+          HealthCheckIntervalSeconds: 5
+          HealthCheckTimeoutSeconds: 3
           HealthyThresholdCount: 2
-          UnhealthyThresholdCount: 3
+          UnhealthyThresholdCount: 2
           Matcher:
             HttpCode: '200'
           TargetGroupAttributes:
             # The 300s default drains for five minutes with nothing to drain.
             - Key: deregistration_delay.timeout_seconds
-              Value: '30'
+              Value: '5'
 
   # --- Listener -------------------------------------------------------------
 
