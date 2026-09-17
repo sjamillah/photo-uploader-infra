@@ -50,7 +50,7 @@ Resources:
             Statement:
               - Effect: Allow
                 Action: 'secretsmanager:GetSecretValue'
-                Resource: !Ref DbSecretArn
+                Resource: !Sub '${DbSecretArn}*'
 
   # Separate from the execution role: app code cannot pull images or read secrets.
   TaskRole:
