@@ -230,6 +230,7 @@ Resources:
                   - 'application-autoscaling:*'
                   - 'codedeploy:*'
                   - 'codepipeline:*'
+                  - 'codebuild:*'
                   - 'codeconnections:*'
                   - 'codestar-connections:*'
                   - 'events:*'
