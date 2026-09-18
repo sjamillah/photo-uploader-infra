@@ -6,9 +6,6 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# Nothing is written back to the repository: you commit main.packaged.yaml
-# yourself, and this job checks that what you committed is what the templates
-# produce.
 permissions:
   contents: read
 
