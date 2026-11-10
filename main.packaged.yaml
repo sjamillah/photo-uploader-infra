@@ -367,7 +367,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: 
-        https://s3.eu-north-1.amazonaws.com/photo-app-templates-697863031884-eu-north-1/latest/9657eb3ec794c948d00ca7dd38518bf8.template
+        https://s3.eu-north-1.amazonaws.com/photo-app-templates-697863031884-eu-north-1/latest/5affb77aacd772e6ba9c1a8d408e53b8.template
       TimeoutInMinutes: 15
       Parameters:
         ProjectName:

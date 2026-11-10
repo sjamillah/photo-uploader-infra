@@ -23,6 +23,12 @@ Parameters:
   LoadBalancerFullName:
     Type: String
 
+  # Below this many requests in a minute a p95 is not a p95, it is the slowest
+  # request wearing a percentile's name. See HighLatencyAlarm.
+  MinRequestsForLatency:
+    Type: Number
+    Default: 30
+
 Resources:
 
   CodeDeployApplication:
@@ -48,7 +54,11 @@ Resources:
         TerminateBlueInstancesOnDeploymentSuccess:
           Action: TERMINATE
           # Old tasks outlive the cutover, so a rollback needs no cold start.
-          TerminationWaitTimeInMinutes: 0
+          # This is also the only window in which the gating alarms below see
+          # the new task set serving production traffic: at 0 the deployment
+          # finished in about a minute, which is less than the delay on an ALB
+          # latency datapoint, so the gate only ever judged the old version.
+          TerminationWaitTimeInMinutes: 5
       AutoRollbackConfiguration:
         Enabled: true
         Events:
@@ -100,20 +110,58 @@ Resources:
       OKActions:
         - !Ref AlertTopicArn
 
+  # This alarm stopped deployment d-7EU8KC3QJ on 2026-09-18 and it was wrong to.
+  #
+  # The ALB carries single digit requests a minute. At that volume a p95 is just
+  # the slowest request, and the slowest request on this site is always the same
+  # thing: POST /api/photos, which decodes the upload, resizes it twice through
+  # LANCZOS, encodes two WebPs and does two S3 puts, all inside the request. One
+  # such upload at 08:50:05 put the 08:50 datapoint at 7.83s over four samples.
+  # ALB latency datapoints also arrive late, so CloudWatch was still evaluating
+  # that 08:50 datapoint at 08:53:40 - by which time the deployment had started,
+  # and it was rolled back over a number the old version produced before it began.
+  #
+  # Two changes. The expression holds the gate shut below MinRequestsForLatency
+  # requests a minute, so a p95 only counts once enough requests went into it,
+  # and it now takes two breaching minutes out of three, which no single slow
+  # upload can produce.
   HighLatencyAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub '${ProjectName}-high-latency'
-      AlarmDescription: p95 response time above two seconds
-      Namespace: AWS/ApplicationELB
-      MetricName: TargetResponseTime
-      Dimensions:
-        - Name: LoadBalancer
-          Value: !Ref LoadBalancerFullName
-      # p95, not Average, which hides the tail.
-      ExtendedStatistic: p95
-      Period: 60
-      EvaluationPeriods: 1
+      AlarmDescription: >-
+        p95 response time above two seconds for two of three minutes, counting
+        only minutes that carried enough traffic for a p95 to mean anything
+      Metrics:
+        - Id: latency
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/ApplicationELB
+              MetricName: TargetResponseTime
+              Dimensions:
+                - Name: LoadBalancer
+                  Value: !Ref LoadBalancerFullName
+            Period: 60
+            # p95, not Average, which hides the tail.
+            Stat: p95
+        - Id: requests
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/ApplicationELB
+              MetricName: RequestCount
+              Dimensions:
+                - Name: LoadBalancer
+                  Value: !Ref LoadBalancerFullName
+            Period: 60
+            Stat: Sum
+        - Id: latency_when_busy
+          ReturnData: true
+          Label: p95 response time over minutes carrying real traffic
+          Expression: !Sub 'IF(requests >= ${MinRequestsForLatency}, latency, 0)'
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
       Threshold: 2
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
